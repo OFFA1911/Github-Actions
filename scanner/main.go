@@ -190,7 +190,7 @@ func sendChunkNotif(cfg Config, results []Result, totalURLs int) {
 		if !r.Ok {
 			val = "❌ Failed"
 		}
-		fields.append(map[string]any{
+		fields = append(fields, map[string]any{
 			"name": r.Domain, "value": val, "inline": true,
 		})
 	}
