@@ -1,0 +1,136 @@
+name: 🕸️ Wayback Machine URL Fetcher
+
+on:
+  workflow_dispatch:
+    inputs:
+      domain:
+        description: 'Domain to scan (e.g. example.com) — leave empty to use targets.txt'
+        required: false
+        default: ''
+      limit:
+        description: 'Max URLs per domain'
+        required: false
+        default: '100000'
+
+jobs:
+  wayback-fetch:
+    name: Fetch URLs from Wayback Machine
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: 📥 Checkout repo
+        uses: actions/checkout@v4
+
+      - name: 🔧 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 📦 Install dependencies
+        run: pip install requests
+
+      - name: 🕸️ Fetch Wayback URLs
+        env:
+          DOMAIN_INPUT: ${{ github.event.inputs.domain }}
+          LIMIT: ${{ github.event.inputs.limit }}
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: |
+          python3 << 'PYEOF'
+          import os, requests, time, json
+          from datetime import datetime
+
+          domain_input = os.environ.get("DOMAIN_INPUT", "").strip()
+          limit        = os.environ.get("LIMIT", "100000").strip()
+          webhook_url  = os.environ.get("DISCORD_WEBHOOK", "")
+          run_url      = f"https://github.com/{os.environ.get('GITHUB_REPOSITORY')}/actions/runs/{os.environ.get('GITHUB_RUN_ID')}"
+
+          # Build domain list
+          if domain_input:
+              domains = [domain_input]
+          else:
+              if not os.path.exists("targets.txt"):
+                  print("❌ No domain input and targets.txt not found.")
+                  exit(1)
+              with open("targets.txt") as f:
+                  domains = [l.strip() for l in f if l.strip() and not l.startswith("#")]
+
+          if not domains:
+              print("❌ No domains to scan.")
+              exit(1)
+
+          print(f"📋 Found {len(domains)} domain(s) to scan")
+
+          os.makedirs("results", exist_ok=True)
+          summary_lines = []
+
+          for domain in domains:
+              print(f"\n🔍 Scanning: {domain}")
+              safe_name = domain.replace(".", "_").replace("/", "_")
+              out_file  = f"results/{safe_name}.txt"
+
+              try:
+                  url = (
+                      f"http://web.archive.org/cdx/search/cdx"
+                      f"?url=*.{domain}/*"
+                      f"&output=text"
+                      f"&fl=original"
+                      f"&collapse=urlkey"
+                      f"&limit={limit}"
+                  )
+                  print(f"   → Calling CDX API...")
+                  resp = requests.get(url, timeout=120)
+                  resp.raise_for_status()
+
+                  lines = [l for l in resp.text.splitlines() if l.strip()]
+                  unique = sorted(set(lines))
+
+                  with open(out_file, "w") as f:
+                      f.write("\n".join(unique) + "\n")
+
+                  count = len(unique)
+                  print(f"   ✅ {count:,} unique URLs saved → {out_file}")
+                  summary_lines.append((domain, count, True))
+
+              except Exception as e:
+                  print(f"   ❌ Error: {e}")
+                  summary_lines.append((domain, 0, False))
+
+              time.sleep(1)  # be polite to Wayback API
+
+          # --- Send Discord Notification ---
+          if webhook_url:
+              total_urls = sum(c for _, c, ok in summary_lines if ok)
+              now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+
+              fields = []
+              for domain, count, ok in summary_lines:
+                  status = f"✅ {count:,} URLs" if ok else "❌ Failed"
+                  fields.append({"name": domain, "value": status, "inline": True})
+
+              embed = {
+                  "title": "🕸️ Wayback Machine Scan Complete",
+                  "color": 0x00ff99,
+                  "fields": fields,
+                  "footer": {"text": f"Total: {total_urls:,} URLs • {now}"},
+                  "description": f"[📂 View Artifacts]({run_url})"
+              }
+
+              payload = {"embeds": [embed]}
+              r = requests.post(webhook_url, json=payload, timeout=15)
+              if r.status_code in (200, 204):
+                  print("\n✅ Discord notification sent!")
+              else:
+                  print(f"\n⚠️ Discord webhook failed: {r.status_code} - {r.text}")
+          else:
+              print("\n⚠️ DISCORD_WEBHOOK secret not set — skipping notification.")
+
+          PYEOF
+
+      - name: 📤 Upload Results as Artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: wayback-results-${{ github.run_number }}
+          path: results/
+          retention-days: 30
