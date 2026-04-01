@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -87,22 +86,20 @@ func runScan(args []string) {
 			fmt.Printf("         ⚠️  Write error: %v\n", err)
 		}
 
-		fmt.Printf("         ✅ %s unique URLs  (%s)\n", fmtNum(len(urls)), elapsed)
 		results = append(results, Result{domain, len(urls), true})
 	}
 
-	// ── Merge chunk → all_urls.txt ─────────────────────────────────────────
-	all := mergeDir(cfg.OutDir)
-	if err := writeLines(filepath.Join(cfg.OutDir, "all_urls.txt"), all); err != nil {
-		fmt.Printf("⚠️  Merge write error: %v\n", err)
+	totalURLs := 0
+	for _, r := range results {
+		totalURLs += r.Count
 	}
 
 	elapsed := time.Since(startAll).Round(time.Second)
-	fmt.Printf("\n🎉 Done! %s unique URLs  (%s elapsed)\n", fmtNum(len(all)), elapsed)
+	fmt.Printf("\n🎉 Chunk Done! %s total URLs found from current domains  (%s elapsed)\n", fmtNum(totalURLs), elapsed)
 
 	// ── Discord chunk notification ──────────────────────────────────────────
 	if cfg.Webhook != "" {
-		sendChunkNotif(cfg, results, len(all))
+		sendChunkNotif(cfg, results, totalURLs)
 	}
 }
 
@@ -237,36 +234,6 @@ func dedup(buf *bytes.Buffer) []string {
 			seen[line] = struct{}{}
 		}
 	}
-	out := make([]string, 0, len(seen))
-	for u := range seen {
-		out = append(out, u)
-	}
-	sort.Strings(out)
-	return out
-}
-
-func mergeDir(dir string) []string {
-	seen := make(map[string]struct{})
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-
-	entries, _ := os.ReadDir(dir)
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".txt") || e.Name() == "all_urls.txt" {
-			continue
-		}
-		wg.Add(1)
-		go func(name string) {
-			defer wg.Done()
-			for _, u := range readLines(filepath.Join(dir, name)) {
-				mu.Lock()
-				seen[u] = struct{}{}
-				mu.Unlock()
-			}
-		}(e.Name())
-	}
-	wg.Wait()
-
 	out := make([]string, 0, len(seen))
 	for u := range seen {
 		out = append(out, u)

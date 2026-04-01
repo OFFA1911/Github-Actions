@@ -158,7 +158,8 @@ jobs:
       - name: 🔀 Merge → all_urls.txt
         run: |
           mkdir -p merged
-          find all-chunks/ -name "*.txt" ! -name "all_urls.txt" -exec cat {} \; \
+          # Merge all .txt files from chunks into one file
+          find all-chunks/ -name "*.txt" -exec cat {} \; \
             | sort -u > merged/all_urls.txt
           TOTAL=$(wc -l < merged/all_urls.txt)
           printf "✅ Grand total: %'d unique URLs\n" "$TOTAL"
