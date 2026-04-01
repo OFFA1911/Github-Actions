@@ -64,16 +64,16 @@ func runScan(args []string) {
 	}
 
 	total := len(domains)
-	fmt.Printf("📋 Chunk starting with %d domain(s) | GAU Multi-Provider Mode (Greedy)\n\n", total)
+	fmt.Printf("📋 Chunk starting with %d domain(s) | tomnomnom/waybackurls Mode\n\n", total)
 
 	results := make([]Result, 0, total)
 	startAll := time.Now()
 
 	for i, domain := range domains {
-		fmt.Printf("[%d/%d] 🔍 Scanning: %s\n", i+1, total, domain)
+		fmt.Printf("[%d/%d] 🔍 Fetching: %s\n", i+1, total, domain)
 		t0 := time.Now()
 
-		urls, err := runGau(domain)
+		urls, err := runWaybackurls(domain)
 		elapsed := time.Since(t0).Round(time.Second)
 
 		if err != nil {
@@ -86,7 +86,7 @@ func runScan(args []string) {
 			fmt.Printf("         ⚠️  Write error: %v\n", err)
 		}
 
-		fmt.Printf("         ✅ %s unique URLs extracted from GAU All-Sources  (%s)\n", fmtNum(len(urls)), elapsed)
+		fmt.Printf("         ✅ %s unique URLs extracted from Wayback Archive  (%s)\n", fmtNum(len(urls)), elapsed)
 		results = append(results, Result{domain, len(urls), true})
 	}
 
@@ -123,10 +123,10 @@ func runNotify(args []string) {
 	now := time.Now().UTC().Format("2006-01-02 15:04 UTC")
 
 	embed := map[string]any{
-		"title": "� GAU Scan Complete",
+		"title": "🕸️ Wayback Scan Complete",
 		"color": 0x5865F2,
 		"description": fmt.Sprintf(
-			"📊 **%s unique URLs** across all domains (Multi-Provider)\n[📂 View Artifacts](%s)",
+			"📊 **%s unique URLs** across all domains (tomnomnom/waybackurls)\n[📂 View Artifacts](%s)",
 			fmtNum(*total), runURL,
 		),
 		"footer": map[string]string{"text": fmt.Sprintf("Finished at %s", now)},
@@ -134,11 +134,12 @@ func runNotify(args []string) {
 	sendEmbed(*webhook, embed)
 }
 
-// ─── GAU Runner (Multi-Provider) ───────────────────────────────────────────
+// ─── waybackurls Runner ────────────────────────────────────────────────────
 
-func runGau(domain string) ([]string, error) {
-	// Greedy flags: include subdomains, use all providers, no built-in filters
-	cmd := exec.Command("gau", "--subs", "--providers", "wayback,commoncrawl,otx,urlscan", domain)
+func runWaybackurls(domain string) ([]string, error) {
+	// tomnomnom's waybackurls reads from stdin
+	cmd := exec.Command("waybackurls")
+	cmd.Stdin = strings.NewReader(domain)
 	cmd.Env = os.Environ()
 
 	var stdout, stderr bytes.Buffer
@@ -150,11 +151,6 @@ func runGau(domain string) ([]string, error) {
 			return nil, fmt.Errorf("%v — %s", err, se)
 		}
 		return nil, err
-	}
-
-	// Capture warnings/messages from stderr even on success
-	if se := strings.TrimSpace(stderr.String()); se != "" {
-		fmt.Printf("         ℹ️  Note: %s\n", se)
 	}
 
 	seen := make(map[string]struct{})
@@ -191,7 +187,7 @@ func sendChunkNotif(cfg Config, results []Result, totalURLs int) {
 	}
 
 	embed := map[string]any{
-		"title":  "� GAU Chunk Done",
+		"title":  "🕸️ Wayback Chunk Done",
 		"color":  0x00ff99,
 		"fields": fields,
 		"footer": map[string]string{
