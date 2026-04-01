@@ -59,7 +59,12 @@ jobs:
             matrix=$(echo "$matrix" | jq --argjson c "$chunk_json" '. + [$c]')
           fi
 
-          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          # Use multiline syntax for GITHUB_OUTPUT to handle JSON safely
+          {
+            echo "matrix<<EOF"
+            echo "$matrix"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
 # ─────────────────────────────────────────────
 # JOB 2 — Build & run Go scanner on each chunk
