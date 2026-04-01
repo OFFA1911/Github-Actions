@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -28,7 +29,6 @@ type Config struct {
 	Webhook     string
 	Repo        string
 	RunID       string
-	Limit       int
 }
 
 // ─── Entry point ───────────────────────────────────────────────────────────
@@ -53,7 +53,6 @@ func runScan(args []string) {
 	fs.StringVar(&cfg.Webhook, "webhook", "", "Discord webhook")
 	fs.StringVar(&cfg.Repo, "repo", env("GITHUB_REPOSITORY", ""), "GitHub repo")
 	fs.StringVar(&cfg.RunID, "run-id", env("GITHUB_RUN_ID", ""), "GitHub run ID")
-	fs.IntVar(&cfg.Limit, "limit", 100000000, "CDX API limit per domain")
 	_ = fs.Parse(args)
 
 	domains := readLines(cfg.DomainsFile)
@@ -65,16 +64,16 @@ func runScan(args []string) {
 	}
 
 	total := len(domains)
-	fmt.Printf("📋 Chunk starting with %d domain(s) | Direct Wayback CDX Mode\n\n", total)
+	fmt.Printf("📋 Chunk starting with %d domain(s) | GAU Multi-Provider Mode (Greedy)\n\n", total)
 
 	results := make([]Result, 0, total)
 	startAll := time.Now()
 
 	for i, domain := range domains {
-		fmt.Printf("[%d/%d] 🔍 Fetching: %s\n", i+1, total, domain)
+		fmt.Printf("[%d/%d] 🔍 Scanning: %s\n", i+1, total, domain)
 		t0 := time.Now()
 
-		urls, err := fetchWayback(domain, cfg.Limit)
+		urls, err := runGau(domain)
 		elapsed := time.Since(t0).Round(time.Second)
 
 		if err != nil {
@@ -87,7 +86,7 @@ func runScan(args []string) {
 			fmt.Printf("         ⚠️  Write error: %v\n", err)
 		}
 
-		fmt.Printf("         ✅ %s unique URLs extracted from Wayback CDX  (%s)\n", fmtNum(len(urls)), elapsed)
+		fmt.Printf("         ✅ %s unique URLs extracted from GAU All-Sources  (%s)\n", fmtNum(len(urls)), elapsed)
 		results = append(results, Result{domain, len(urls), true})
 	}
 
@@ -124,10 +123,10 @@ func runNotify(args []string) {
 	now := time.Now().UTC().Format("2006-01-02 15:04 UTC")
 
 	embed := map[string]any{
-		"title": "🕸️ Wayback Scan Complete",
+		"title": "� GAU Scan Complete",
 		"color": 0x5865F2,
 		"description": fmt.Sprintf(
-			"📊 **%s unique URLs** across all domains\n[📂 View Artifacts](%s)",
+			"📊 **%s unique URLs** across all domains (Multi-Provider)\n[📂 View Artifacts](%s)",
 			fmtNum(*total), runURL,
 		),
 		"footer": map[string]string{"text": fmt.Sprintf("Finished at %s", now)},
@@ -135,39 +134,35 @@ func runNotify(args []string) {
 	sendEmbed(*webhook, embed)
 }
 
-// ─── Wayback CDX Fetcher ───────────────────────────────────────────────────
+// ─── GAU Runner (Multi-Provider) ───────────────────────────────────────────
 
-func fetchWayback(domain string, limit int) ([]string, error) {
-	apiURL := fmt.Sprintf(
-		"http://web.archive.org/cdx/search/cdx?url=*.%s/*&output=text&fl=original&collapse=urlkey&limit=%d",
-		domain, limit,
-	)
+func runGau(domain string) ([]string, error) {
+	// Greedy flags: include subdomains, use all providers, no built-in filters
+	cmd := exec.Command("gau", "--subs", "--providers", "wayback,commoncrawl,otx,urlscan", domain)
+	cmd.Env = os.Environ()
 
-	// Use a longer timeout for huge results
-	client := &http.Client{Timeout: 10 * time.Minute}
-	resp, err := client.Get(apiURL)
-	if err != nil {
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		if se := strings.TrimSpace(stderr.String()); se != "" {
+			return nil, fmt.Errorf("%v — %s", err, se)
+		}
 		return nil, err
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("Wayback CDX API returned HTTP %d", resp.StatusCode)
+	// Capture warnings/messages from stderr even on success
+	if se := strings.TrimSpace(stderr.String()); se != "" {
+		fmt.Printf("         ℹ️  Note: %s\n", se)
 	}
 
 	seen := make(map[string]struct{})
-	sc := bufio.NewScanner(resp.Body)
-	// Handle potentially huge lines (though CDX is one URL per line)
-	buf := make([]byte, 1024*1024)
-	sc.Buffer(buf, 10*1024*1024)
-
+	sc := bufio.NewScanner(&stdout)
 	for sc.Scan() {
 		if line := strings.TrimSpace(sc.Text()); line != "" {
 			seen[line] = struct{}{}
 		}
-	}
-	if err := sc.Err(); err != nil {
-		return nil, fmt.Errorf("read error: %v", err)
 	}
 
 	out := make([]string, 0, len(seen))
@@ -196,7 +191,7 @@ func sendChunkNotif(cfg Config, results []Result, totalURLs int) {
 	}
 
 	embed := map[string]any{
-		"title":  "🕸️ Wayback Chunk Done",
+		"title":  "� GAU Chunk Done",
 		"color":  0x00ff99,
 		"fields": fields,
 		"footer": map[string]string{
