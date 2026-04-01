@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -29,6 +28,7 @@ type Config struct {
 	Webhook     string
 	Repo        string
 	RunID       string
+	Limit       int
 }
 
 // ─── Entry point ───────────────────────────────────────────────────────────
@@ -42,17 +42,18 @@ func main() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// SUBCOMMAND: scan  (default, no subcommand needed)
+// SUBCOMMAND: scan
 // ─────────────────────────────────────────────────────────────────────────
 
 func runScan(args []string) {
 	fs := flag.NewFlagSet("scan", flag.ExitOnError)
 	cfg := Config{}
 	fs.StringVar(&cfg.DomainsFile, "domains", "domains.txt", "File with one domain per line")
-	fs.StringVar(&cfg.OutDir, "out", "results", "Output directory")
-	fs.StringVar(&cfg.Webhook, "webhook", "", "Discord webhook URL (chunk notification)")
+	fs.StringVar(&cfg.OutDir, "out", "scanner/results", "Output directory")
+	fs.StringVar(&cfg.Webhook, "webhook", "", "Discord webhook")
 	fs.StringVar(&cfg.Repo, "repo", env("GITHUB_REPOSITORY", ""), "GitHub repo")
 	fs.StringVar(&cfg.RunID, "run-id", env("GITHUB_RUN_ID", ""), "GitHub run ID")
+	fs.IntVar(&cfg.Limit, "limit", 100000000, "CDX API limit per domain")
 	_ = fs.Parse(args)
 
 	domains := readLines(cfg.DomainsFile)
@@ -64,16 +65,16 @@ func runScan(args []string) {
 	}
 
 	total := len(domains)
-	fmt.Printf("📋 Chunk has %d domain(s) to scan\n\n", total)
+	fmt.Printf("📋 Chunk starting with %d domain(s) | Direct Wayback CDX Mode\n\n", total)
 
 	results := make([]Result, 0, total)
 	startAll := time.Now()
 
 	for i, domain := range domains {
-		fmt.Printf("[%d/%d] 🔍 Scanning: %s\n", i+1, total, domain)
+		fmt.Printf("[%d/%d] 🔍 Fetching: %s\n", i+1, total, domain)
 		t0 := time.Now()
 
-		urls, err := runGau(domain)
+		urls, err := fetchWayback(domain, cfg.Limit)
 		elapsed := time.Since(t0).Round(time.Second)
 
 		if err != nil {
@@ -86,6 +87,7 @@ func runScan(args []string) {
 			fmt.Printf("         ⚠️  Write error: %v\n", err)
 		}
 
+		fmt.Printf("         ✅ %s unique URLs extracted from Wayback CDX  (%s)\n", fmtNum(len(urls)), elapsed)
 		results = append(results, Result{domain, len(urls), true})
 	}
 
@@ -95,28 +97,26 @@ func runScan(args []string) {
 	}
 
 	elapsed := time.Since(startAll).Round(time.Second)
-	fmt.Printf("\n🎉 Chunk Done! %s total URLs found from current domains  (%s elapsed)\n", fmtNum(totalURLs), elapsed)
+	fmt.Printf("\n🎉 Chunk Done! %s total URLs from current domains  (%s elapsed)\n", fmtNum(totalURLs), elapsed)
 
-	// ── Discord chunk notification ──────────────────────────────────────────
 	if cfg.Webhook != "" {
 		sendChunkNotif(cfg, results, totalURLs)
 	}
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// SUBCOMMAND: notify  (final merged summary)
+// SUBCOMMAND: notify
 // ─────────────────────────────────────────────────────────────────────────
 
 func runNotify(args []string) {
 	fs := flag.NewFlagSet("notify", flag.ExitOnError)
-	total := fs.Int("total", 0, "Total unique URLs in merged file")
-	webhook := fs.String("webhook", "", "Discord webhook URL")
-	repo := fs.String("repo", env("GITHUB_REPOSITORY", ""), "GitHub repo")
-	runID := fs.String("run-id", env("GITHUB_RUN_ID", ""), "GitHub run ID")
+	total := fs.Int("total", 0, "Total count")
+	webhook := fs.String("webhook", "", "Webhook URL")
+	repo := fs.String("repo", env("GITHUB_REPOSITORY", ""), "Repo")
+	runID := fs.String("run-id", env("GITHUB_RUN_ID", ""), "Run ID")
 	_ = fs.Parse(args)
 
 	if *webhook == "" {
-		fmt.Println("⚠️  No webhook — skipping Discord notification")
 		return
 	}
 
@@ -124,40 +124,58 @@ func runNotify(args []string) {
 	now := time.Now().UTC().Format("2006-01-02 15:04 UTC")
 
 	embed := map[string]any{
-		"title": "✅ GAU Scan — Complete!",
+		"title": "🕸️ Wayback Scan Complete",
 		"color": 0x5865F2,
 		"description": fmt.Sprintf(
-			"📊 **%s unique URLs** across all domains\n[📂 Download `all_urls.txt`](%s)",
+			"📊 **%s unique URLs** across all domains\n[📂 View Artifacts](%s)",
 			fmtNum(*total), runURL,
 		),
 		"footer": map[string]string{"text": fmt.Sprintf("Finished at %s", now)},
 	}
-
 	sendEmbed(*webhook, embed)
-	fmt.Printf("✅ Final summary sent — %s total URLs\n", fmtNum(*total))
 }
 
-// ─── GAU runner ────────────────────────────────────────────────────────────
+// ─── Wayback CDX Fetcher ───────────────────────────────────────────────────
 
-func runGau(domain string) ([]string, error) {
-	cmd := exec.Command("gau", domain)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+func fetchWayback(domain string, limit int) ([]string, error) {
+	apiURL := fmt.Sprintf(
+		"http://web.archive.org/cdx/search/cdx?url=*.%s/*&output=text&fl=original&collapse=urlkey&limit=%d",
+		domain, limit,
+	)
 
-	if err := cmd.Run(); err != nil {
-		if se := strings.TrimSpace(stderr.String()); se != "" {
-			return nil, fmt.Errorf("%v — %s", err, se)
-		}
+	// Use a longer timeout for huge results
+	client := &http.Client{Timeout: 10 * time.Minute}
+	resp, err := client.Get(apiURL)
+	if err != nil {
 		return nil, err
 	}
+	defer resp.Body.Close()
 
-	// Capture warnings/messages from stderr even on success
-	if se := strings.TrimSpace(stderr.String()); se != "" {
-		fmt.Printf("         ℹ️  Note: %s\n", se)
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("Wayback CDX API returned HTTP %d", resp.StatusCode)
 	}
 
-	return dedup(&stdout), nil
+	seen := make(map[string]struct{})
+	sc := bufio.NewScanner(resp.Body)
+	// Handle potentially huge lines (though CDX is one URL per line)
+	buf := make([]byte, 1024*1024)
+	sc.Buffer(buf, 10*1024*1024)
+
+	for sc.Scan() {
+		if line := strings.TrimSpace(sc.Text()); line != "" {
+			seen[line] = struct{}{}
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("read error: %v", err)
+	}
+
+	out := make([]string, 0, len(seen))
+	for u := range seen {
+		out = append(out, u)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // ─── Discord helpers ───────────────────────────────────────────────────────
@@ -172,17 +190,17 @@ func sendChunkNotif(cfg Config, results []Result, totalURLs int) {
 		if !r.Ok {
 			val = "❌ Failed"
 		}
-		fields = append(fields, map[string]any{
+		fields.append(map[string]any{
 			"name": r.Domain, "value": val, "inline": true,
 		})
 	}
 
 	embed := map[string]any{
-		"title":  "🔍 GAU Chunk Done",
+		"title":  "🕸️ Wayback Chunk Done",
 		"color":  0x00ff99,
 		"fields": fields,
 		"footer": map[string]string{
-			"text": fmt.Sprintf("Chunk: %s URLs • %s | %s", fmtNum(totalURLs), now, runURL),
+			"text": fmt.Sprintf("Total: %s URLs • %s | %s", fmtNum(totalURLs), now, runURL),
 		},
 	}
 	sendEmbed(cfg.Webhook, embed)
@@ -190,15 +208,14 @@ func sendChunkNotif(cfg Config, results []Result, totalURLs int) {
 
 func sendEmbed(webhookURL string, embed map[string]any) {
 	payload, _ := json.Marshal(map[string]any{"embeds": []any{embed}})
-	resp, err := http.Post(webhookURL, "application/json", bytes.NewReader(payload)) //nolint:noctx
+	req, _ := http.NewRequest("POST", webhookURL, bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		fmt.Printf("⚠️  Discord: %v\n", err)
 		return
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 200 && resp.StatusCode != 204 {
-		fmt.Printf("⚠️  Discord HTTP %d\n", resp.StatusCode)
-	}
 }
 
 // ─── File helpers ──────────────────────────────────────────────────────────
@@ -231,24 +248,6 @@ func writeLines(path string, lines []string) error {
 	}
 	return w.Flush()
 }
-
-func dedup(buf *bytes.Buffer) []string {
-	seen := make(map[string]struct{})
-	sc := bufio.NewScanner(buf)
-	for sc.Scan() {
-		if line := strings.TrimSpace(sc.Text()); line != "" {
-			seen[line] = struct{}{}
-		}
-	}
-	out := make([]string, 0, len(seen))
-	for u := range seen {
-		out = append(out, u)
-	}
-	sort.Strings(out)
-	return out
-}
-
-// ─── Misc helpers ──────────────────────────────────────────────────────────
 
 func safeName(s string) string {
 	return strings.NewReplacer(".", "_", "/", "_", ":", "_").Replace(s)

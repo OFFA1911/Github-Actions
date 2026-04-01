@@ -1,4 +1,4 @@
-name: 🔍 GAU URL Fetcher
+name: 🔍 Wayback URL Fetcher (Direct API)
 
 on:
   workflow_dispatch:
@@ -32,7 +32,6 @@ jobs:
           DOMAIN_INPUT: ${{ github.event.inputs.domain }}
           CHUNK_SIZE:   ${{ github.event.inputs.chunk_size }}
         run: |
-          # Build the flat domain list
           if [ -n "$DOMAIN_INPUT" ]; then
             mapfile -t domains <<< "$DOMAIN_INPUT"
           else
@@ -42,7 +41,6 @@ jobs:
           chunk_size=${CHUNK_SIZE:-30}
           echo "✅ $total domain(s) → splitting into chunks of $chunk_size"
 
-          # Build a JSON array-of-arrays (one inner array per chunk)
           matrix="[]"
           chunk=()
           for domain in "${domains[@]}"; do
@@ -53,13 +51,11 @@ jobs:
               chunk=()
             fi
           done
-          # Remaining domains (last chunk)
           if (( ${#chunk[@]} > 0 )); then
             chunk_json=$(printf '%s\n' "${chunk[@]}" | jq -Rcs 'split("\n")[:-1]')
             matrix=$(echo "$matrix" | jq --argjson c "$chunk_json" '. + [$c]')
           fi
 
-          # Use multiline syntax for GITHUB_OUTPUT to handle JSON safely
           {
             echo "matrix<<EOF"
             echo "$matrix"
@@ -70,10 +66,10 @@ jobs:
 # JOB 2 — Build & run Go scanner on each chunk
 # ─────────────────────────────────────────────
   fetch:
-    name: '🌐 Fetch chunk ${{ strategy.job-index }}'
+    name: '🕸️ Fetch chunk ${{ strategy.job-index }}'
     needs: setup
     runs-on: ubuntu-latest
-    timeout-minutes: 340
+    timeout-minutes: 350
     strategy:
       matrix:
         chunk: ${{ fromJson(needs.setup.outputs.matrix) }}
@@ -83,25 +79,6 @@ jobs:
       - name: 📥 Checkout
         uses: actions/checkout@v4
 
-      - name: ⚙️ Install gau
-        run: |
-          curl -sL https://github.com/lc/gau/releases/latest/download/gau_2.2.4_linux_amd64.tar.gz \
-            | tar xz -C /usr/local/bin gau
-          chmod +x /usr/local/bin/gau
-
-      - name: 📝 Configure gau
-        env:
-          URLSCAN_API_KEY: ${{ secrets.URLSCAN_API_KEY }}
-          OTX_API_KEY:     ${{ secrets.OTX_API_KEY }}
-        run: |
-          cp .gau.toml "$HOME/.gau.toml"
-          [ -n "$URLSCAN_API_KEY" ] && \
-            sed -i "/\[urlscan\]/,/apikey/ s/apikey = \".*\"/apikey = \"$URLSCAN_API_KEY\"/" "$HOME/.gau.toml" && \
-            echo "✅ URLScan key injected"
-          [ -n "$OTX_API_KEY" ] && \
-            sed -i "/\[otx\]/,/apikey/ s/apikey = \".*\"/apikey = \"$OTX_API_KEY\"/" "$HOME/.gau.toml" && \
-            echo "✅ OTX key injected"
-
       - name: 🔧 Setup Go
         uses: actions/setup-go@v5
         with:
@@ -110,19 +87,17 @@ jobs:
           cache-dependency-path: scanner/go.mod
 
       - name: 🏗️ Build scanner
-        run: cd scanner && go build -o /usr/local/bin/gau-scanner .
+        run: cd scanner && go build -o /usr/local/bin/wayback-scanner .
 
       - name: 📝 Write domains file
         run: |
           echo '${{ toJson(matrix.chunk) }}' | jq -r '.[]' > domains.txt
-          echo "📋 This chunk:"
-          cat domains.txt | nl -ba
 
-      - name: 🔍 Run scanner
+      - name: 🔍 Run scanner (Direct Wayback)
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: |
-          gau-scanner \
+          wayback-scanner \
             -domains domains.txt \
             -out     scanner/results \
             -webhook "$DISCORD_WEBHOOK"
@@ -131,9 +106,9 @@ jobs:
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: gau-results-chunk-${{ strategy.job-index }}
+          name: wayback-results-chunk-${{ strategy.job-index }}
           path: scanner/results/
-          retention-days: 30
+          retention-days: 7
 
 # ─────────────────────────────────────────────
 # JOB 3 — Merge all chunks into one file
@@ -151,41 +126,38 @@ jobs:
       - name: 📥 Download all chunk artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: gau-results-chunk-*
+          pattern: wayback-results-chunk-*
           path: all-chunks/
           merge-multiple: false
 
       - name: 🔀 Merge → all_urls.txt
         run: |
           mkdir -p merged
-          # Merge all .txt files from chunks into one file
           find all-chunks/ -name "*.txt" -exec cat {} \; \
             | sort -u > merged/all_urls.txt
           TOTAL=$(wc -l < merged/all_urls.txt)
           printf "✅ Grand total: %'d unique URLs\n" "$TOTAL"
           echo "TOTAL_URLS=$TOTAL" >> "$GITHUB_ENV"
 
-      - name: 📤 Upload merged file
+      - name: 📤 Upload final merged file
         uses: actions/upload-artifact@v4
         with:
-          name: gau-ALL-RESULTS-${{ github.run_number }}
+          name: wayback-ALL-RESULTS-${{ github.run_number }}
           path: merged/all_urls.txt
           retention-days: 30
 
-      - name: � Setup Go
+      - name: 🔧 Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
-          cache: true
-          cache-dependency-path: scanner/go.mod
 
-      - name: 🏗️ Build scanner
-        run: cd scanner && go build -o /usr/local/bin/gau-scanner .
+      - name: 🏗️ Build scanner (for notify)
+        run: cd scanner && go build -o /usr/local/bin/wayback-scanner .
 
-      - name: � Send final Discord summary
+      - name: 🔔 Final Discord summary
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: |
-          gau-scanner notify \
+          wayback-scanner notify \
             -total   "$TOTAL_URLS" \
             -webhook "$DISCORD_WEBHOOK"
