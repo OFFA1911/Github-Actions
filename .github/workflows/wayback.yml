@@ -1,4 +1,4 @@
-name: 🔍 Wayback URL Fetcher (Direct API)
+name: 🔍 Wayback URL Fetcher
 
 on:
   workflow_dispatch:
@@ -86,18 +86,23 @@ jobs:
           cache: true
           cache-dependency-path: scanner/go.mod
 
+      - name: ⚙️ Install waybackurls (tomnomnom)
+        run: |
+          go install github.com/tomnomnom/waybackurls@latest
+          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+
       - name: 🏗️ Build scanner
-        run: cd scanner && go build -o /usr/local/bin/wayback-scanner .
+        run: cd scanner && go build -o wayback-scanner .
 
       - name: 📝 Write domains file
         run: |
           echo '${{ toJson(matrix.chunk) }}' | jq -r '.[]' > domains.txt
 
-      - name: 🔍 Run scanner (Direct Wayback)
+      - name: 🔍 Run scanner (waybackurls)
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: |
-          wayback-scanner \
+          ./scanner/wayback-scanner \
             -domains domains.txt \
             -out     scanner/results \
             -webhook "$DISCORD_WEBHOOK"
@@ -133,6 +138,7 @@ jobs:
       - name: 🔀 Merge → all_urls.txt
         run: |
           mkdir -p merged
+          # Merge all .txt files from chunks into one file
           find all-chunks/ -name "*.txt" -exec cat {} \; \
             | sort -u > merged/all_urls.txt
           TOTAL=$(wc -l < merged/all_urls.txt)
@@ -152,12 +158,12 @@ jobs:
           go-version: '1.22'
 
       - name: 🏗️ Build scanner (for notify)
-        run: cd scanner && go build -o /usr/local/bin/wayback-scanner .
+        run: cd scanner && go build -o wayback-scanner .
 
       - name: 🔔 Final Discord summary
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: |
-          wayback-scanner notify \
+          ./scanner/wayback-scanner notify \
             -total   "$TOTAL_URLS" \
             -webhook "$DISCORD_WEBHOOK"
