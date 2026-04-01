@@ -1,3 +1,2 @@
-# ضع الدومينز هنا - سطر لكل دومين
-# example.com
-# test.org
+army.mil
+zebra.com
