@@ -151,6 +151,12 @@ func runGau(domain string) ([]string, error) {
 		}
 		return nil, err
 	}
+
+	// Capture warnings/messages from stderr even on success
+	if se := strings.TrimSpace(stderr.String()); se != "" {
+		fmt.Printf("         ℹ️  Note: %s\n", se)
+	}
+
 	return dedup(&stdout), nil
 }
 
