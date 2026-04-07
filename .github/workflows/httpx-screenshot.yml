@@ -36,9 +36,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/go/bin
-          key: go-bins-httpx-${{ runner.os }}-v2
+          key: go-bins-httpx-${{ runner.os }}-v3
 
-      # ── 4. Install httpx only on cache miss ────────────────────────────
       - name: ⚙️ Install httpx
         if: steps.cache-bins.outputs.cache-hit != 'true'
         run: go install github.com/projectdiscovery/httpx/cmd/httpx@latest
@@ -46,30 +45,17 @@ jobs:
       - name: 📌 Add Go bin to PATH
         run: echo "$HOME/go/bin" >> $GITHUB_PATH
 
-      # ── 5. Find Chrome (pre-installed on GitHub runners) ──────────────
-      - name: 🌍 Detect Chrome path
-        run: |
-          CHROME=$(which google-chrome-stable || which google-chrome || which chromium-browser || which chromium || echo "")
-          if [ -z "$CHROME" ]; then
-            echo "Chrome not found, installing..."
-            sudo apt-get update -qq && sudo apt-get install -y -qq chromium-browser
-            CHROME=$(which chromium-browser)
-          fi
-          echo "✅ Chrome: $CHROME"
-          echo "CHROME_PATH=$CHROME" >> $GITHUB_ENV
-
-      # ── 6. Prepare targets file ────────────────────────────────────────
+      # ── 4. Prepare targets file ────────────────────────────────────────
       - name: 📝 Prepare targets.txt
         run: |
           if [ -n "${{ github.event.inputs.targets }}" ]; then
-            echo "${{ github.event.inputs.targets }}" > targets.txt
+            printf '%s' "${{ github.event.inputs.targets }}" > targets.txt
           fi
-          echo "[*] Targets loaded: $(wc -l < targets.txt)"
+          echo "[*] Targets: $(wc -l < targets.txt)"
 
-      # ── 7. Run httpx + screenshot ──────────────────────────────────────
-      - name: 🚀 Run httpx + Screenshot
+      # ── 5. Run httpx (probe only, no screenshot) ───────────────────────
+      - name: 🚀 Run httpx
         run: |
-          mkdir -p screenshots
           httpx \
             -l targets.txt \
             -threads ${{ github.event.inputs.threads }} \
@@ -78,13 +64,45 @@ jobs:
             -status-code \
             -title \
             -tech-detect \
-            -follow-redirects \
-            -screenshot \
-            -srd screenshots/ || true
-          echo "[+] Live hosts:  $(wc -l < live_hosts.txt 2>/dev/null || echo 0)"
-          echo "[+] Screenshots: $(find screenshots/ -name '*.png' 2>/dev/null | wc -l)"
+            -follow-redirects
+          echo "[+] Live hosts: $(wc -l < live_hosts.txt)"
+          cat live_hosts.txt
 
-      # ── 8. Upload artifacts ────────────────────────────────────────────
+      # ── 6. Take screenshots with headless Chrome ───────────────────────
+      - name: 📸 Take Screenshots
+        run: |
+          mkdir -p screenshots
+
+          # Extract just the URLs (first column from httpx output)
+          awk '{print $1}' live_hosts.txt > urls_only.txt
+
+          # Install Chromium if not present
+          if ! command -v chromium-browser &>/dev/null && ! command -v google-chrome &>/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq chromium-browser
+          fi
+
+          CHROME=$(command -v google-chrome-stable || command -v google-chrome || command -v chromium-browser || command -v chromium)
+          echo "[*] Using Chrome: $CHROME"
+
+          while IFS= read -r url; do
+            [ -z "$url" ] && continue
+            FNAME=$(echo "$url" | md5sum | cut -d' ' -f1)
+            echo "[→] Screenshot: $url"
+            "$CHROME" \
+              --headless=new \
+              --no-sandbox \
+              --disable-gpu \
+              --disable-dev-shm-usage \
+              --screenshot="screenshots/${FNAME}.png" \
+              --window-size=1280,800 \
+              --timeout=15000 \
+              "$url" 2>/dev/null || echo "  [!] Failed: $url"
+          done < urls_only.txt
+
+          echo "[+] Screenshots: $(find screenshots/ -name '*.png' | wc -l)"
+
+      # ── 7. Upload artifacts ────────────────────────────────────────────
       - name: 📤 Upload results
         uses: actions/upload-artifact@v4
         if: always()
@@ -95,41 +113,30 @@ jobs:
             screenshots/
           retention-days: 14
 
-      # ── 9. Discord notification ────────────────────────────────────────
+      # ── 8. Discord notification ────────────────────────────────────────
       - name: 🔔 Notify Discord
         if: always()
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: |
           LIVE=$(wc -l < live_hosts.txt 2>/dev/null || echo 0)
-          SHOTS=$(find screenshots/ -name '*.png' 2>/dev/null | wc -l)
+          SHOTS=$(find screenshots/ -name '*.png' 2>/dev/null | wc -l || echo 0)
           STATUS="${{ job.status }}"
 
-          if [ "$STATUS" = "success" ]; then
-            COLOR=3066993
-            EMOJI="✅"
-          else
-            COLOR=15158332
-            EMOJI="❌"
-          fi
-
-          PAYLOAD=$(cat <<EOF
-          {
-            "embeds": [{
-              "title": "${EMOJI} httpx + Screenshot — Run #${{ github.run_number }}",
-              "color": ${COLOR},
-              "fields": [
-                { "name": "📋 Status",      "value": "\`${STATUS}\`", "inline": true },
-                { "name": "🌐 Live hosts",  "value": "\`${LIVE}\`",  "inline": true },
-                { "name": "📸 Screenshots", "value": "\`${SHOTS}\`", "inline": true },
-                { "name": "🔗 Run URL", "value": "[View Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})", "inline": false }
-              ],
-              "footer": { "text": "GitHub Actions • ${{ github.repository }}" }
-            }]
-          }
-          EOF
-          )
+          [ "$STATUS" = "success" ] && COLOR=3066993 && EMOJI="✅" || COLOR=15158332 && EMOJI="❌"
 
           curl -s -X POST "$DISCORD_WEBHOOK" \
             -H "Content-Type: application/json" \
-            -d "$PAYLOAD"
+            -d "{
+              \"embeds\": [{
+                \"title\": \"${EMOJI} httpx + Screenshot — Run #${{ github.run_number }}\",
+                \"color\": ${COLOR},
+                \"fields\": [
+                  { \"name\": \"📋 Status\",      \"value\": \"\`${STATUS}\`\", \"inline\": true },
+                  { \"name\": \"🌐 Live hosts\",  \"value\": \"\`${LIVE}\`\",  \"inline\": true },
+                  { \"name\": \"📸 Screenshots\", \"value\": \"\`${SHOTS}\`\", \"inline\": true },
+                  { \"name\": \"🔗 Run URL\", \"value\": \"[View Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})\", \"inline\": false }
+                ],
+                \"footer\": { \"text\": \"GitHub Actions • ${{ github.repository }}\" }
+              }]
+            }"
