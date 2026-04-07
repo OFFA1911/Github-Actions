@@ -1,3 +1,4 @@
-# Add your targets here (one domain/URL per line)
-# Example:
-# https://example.com
+acronis.com
+truecaller.com
+8x8.com
+ripio.com
