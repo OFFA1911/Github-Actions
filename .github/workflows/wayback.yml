@@ -8,9 +8,13 @@ on:
         required: false
         default: ''
       chunk_size:
-        description: 'Domains per parallel job'
+        description: 'Domains per parallel job (smaller = faster per job)'
         required: false
-        default: '30'
+        default: '10'
+      domain_timeout:
+        description: 'Max minutes to wait per domain (waybackurls)'
+        required: false
+        default: '5'
 
 # ─────────────────────────────────────────────
 # JOB 1 — Split targets into matrix chunks
@@ -69,7 +73,7 @@ jobs:
     name: '🕸️ Fetch chunk ${{ strategy.job-index }}'
     needs: setup
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 340   # safely under GitHub's 6-hour hard limit
     strategy:
       matrix:
         chunk: ${{ fromJson(needs.setup.outputs.matrix) }}
@@ -105,6 +109,7 @@ jobs:
           ./scanner/wayback-scanner \
             -domains domains.txt \
             -out     scanner/results \
+            -domain-timeout ${{ github.event.inputs.domain_timeout }} \
             -webhook "$DISCORD_WEBHOOK"
 
       - name: 📤 Upload chunk results

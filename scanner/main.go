@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -48,6 +49,7 @@ func main() {
 func runScan(args []string) {
 	fs := flag.NewFlagSet("scan", flag.ExitOnError)
 	cfg := Config{}
+	domainTimeout := fs.Int("domain-timeout", 5, "Per-domain timeout in minutes")
 	fs.StringVar(&cfg.DomainsFile, "domains", "domains.txt", "File with one domain per line")
 	fs.StringVar(&cfg.OutDir, "out", "scanner/results", "Output directory")
 	fs.StringVar(&cfg.Webhook, "webhook", "", "Discord webhook")
@@ -64,7 +66,8 @@ func runScan(args []string) {
 	}
 
 	total := len(domains)
-	fmt.Printf("📋 Chunk starting with %d domain(s) | tomnomnom/waybackurls Mode\n\n", total)
+	timeoutDur := time.Duration(*domainTimeout) * time.Minute
+	fmt.Printf("📋 Chunk starting with %d domain(s) | tomnomnom/waybackurls Mode | timeout: %v/domain\n\n", total, timeoutDur)
 
 	results := make([]Result, 0, total)
 	startAll := time.Now()
@@ -73,7 +76,9 @@ func runScan(args []string) {
 		fmt.Printf("[%d/%d] 🔍 Fetching: %s\n", i+1, total, domain)
 		t0 := time.Now()
 
-		urls, err := runWaybackurls(domain)
+		ctx, cancel := context.WithTimeout(context.Background(), timeoutDur)
+		urls, err := runWaybackurls(ctx, domain)
+		cancel()
 		elapsed := time.Since(t0).Round(time.Second)
 
 		if err != nil {
@@ -136,9 +141,9 @@ func runNotify(args []string) {
 
 // ─── waybackurls Runner ────────────────────────────────────────────────────
 
-func runWaybackurls(domain string) ([]string, error) {
+func runWaybackurls(ctx context.Context, domain string) ([]string, error) {
 	// tomnomnom's waybackurls reads from stdin
-	cmd := exec.Command("waybackurls")
+	cmd := exec.CommandContext(ctx, "waybackurls")
 	cmd.Stdin = strings.NewReader(domain)
 	cmd.Env = os.Environ()
 
