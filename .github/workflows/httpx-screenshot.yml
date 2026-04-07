@@ -23,32 +23,30 @@ jobs:
       - name: 📥 Checkout
         uses: actions/checkout@v4
 
-      # ── 2. Go setup (needed for tool installs) ─────────────────────────
+      # ── 2. Go setup ────────────────────────────────────────────────────
       - name: 🔧 Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
-          cache: false          # We handle the cache ourselves below
+          cache: false
 
-      # ── 3. Cache Go tools (httpx + gowitness binaries) ─────────────────
+      # ── 3. Cache httpx binary ──────────────────────────────────────────
       - name: 💾 Cache Go binaries
         id: cache-bins
         uses: actions/cache@v4
         with:
           path: ~/go/bin
-          key: go-bins-httpx-gowitness-${{ runner.os }}
+          key: go-bins-httpx-${{ runner.os }}
 
-      # ── 4. Install tools only when cache miss ──────────────────────────
-      - name: ⚙️ Install httpx & gowitness
+      # ── 4. Install httpx only on cache miss ────────────────────────────
+      - name: ⚙️ Install httpx
         if: steps.cache-bins.outputs.cache-hit != 'true'
-        run: |
-          go install github.com/projectdiscovery/httpx/cmd/httpx@latest
-          go install github.com/sensepost/gowitness@latest
+        run: go install github.com/projectdiscovery/httpx/cmd/httpx@latest
 
       - name: 📌 Add Go bin to PATH
         run: echo "$HOME/go/bin" >> $GITHUB_PATH
 
-      # ── 5. Prepare Chrome (needed by gowitness) ────────────────────────
+      # ── 5. Prepare Chrome (required for httpx -screenshot) ─────────────
       - name: 🌍 Install Chrome
         uses: browser-actions/setup-chrome@v1
 
@@ -60,9 +58,10 @@ jobs:
           fi
           echo "[*] Targets loaded: $(wc -l < targets.txt)"
 
-      # ── 7. Run httpx ───────────────────────────────────────────────────
-      - name: 🚀 Run httpx
+      # ── 7. Run httpx with built-in screenshot ──────────────────────────
+      - name: 🚀 Run httpx + Screenshot
         run: |
+          mkdir -p screenshots
           httpx \
             -l targets.txt \
             -threads ${{ github.event.inputs.threads }} \
@@ -71,23 +70,13 @@ jobs:
             -status-code \
             -title \
             -tech-detect \
-            -follow-redirects
-          echo "[+] Live hosts: $(wc -l < live_hosts.txt)"
+            -follow-redirects \
+            -screenshot \
+            -srd screenshots/
+          echo "[+] Live hosts:   $(wc -l < live_hosts.txt)"
+          echo "[+] Screenshots:  $(find screenshots/ -name '*.png' 2>/dev/null | wc -l)"
 
-      # ── 8. Take screenshots with gowitness ────────────────────────────
-      - name: 📸 Screenshot live hosts
-        run: |
-          mkdir -p screenshots
-          # gowitness reads a plain URL list — strip the extra httpx fields first
-          awk '{print $1}' live_hosts.txt > urls_only.txt
-          gowitness scan file \
-            --file urls_only.txt \
-            --screenshot-path screenshots/ \
-            --threads 5 \
-            --timeout 20
-          echo "[+] Screenshots taken: $(ls screenshots/*.png 2>/dev/null | wc -l)"
-
-      # ── 9. Upload artifacts ────────────────────────────────────────────
+      # ── 8. Upload artifacts ────────────────────────────────────────────
       - name: 📤 Upload results
         uses: actions/upload-artifact@v4
         if: always()
@@ -98,21 +87,21 @@ jobs:
             screenshots/
           retention-days: 14
 
-      # ── 10. Discord notification ───────────────────────────────────────
+      # ── 9. Discord notification ────────────────────────────────────────
       - name: 🔔 Notify Discord
         if: always()
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: |
           LIVE=$(wc -l < live_hosts.txt 2>/dev/null || echo 0)
-          SHOTS=$(ls screenshots/*.png 2>/dev/null | wc -l || echo 0)
+          SHOTS=$(find screenshots/ -name '*.png' 2>/dev/null | wc -l || echo 0)
           STATUS="${{ job.status }}"
 
           if [ "$STATUS" = "success" ]; then
-            COLOR=3066993      # green
+            COLOR=3066993
             EMOJI="✅"
           else
-            COLOR=15158332     # red
+            COLOR=15158332
             EMOJI="❌"
           fi
 
@@ -122,10 +111,10 @@ jobs:
               "title": "${EMOJI} httpx + Screenshot — Run #${{ github.run_number }}",
               "color": ${COLOR},
               "fields": [
-                { "name": "📋 Status",         "value": "\`${STATUS}\`",   "inline": true },
-                { "name": "🌐 Live hosts",     "value": "\`${LIVE}\`",    "inline": true },
-                { "name": "📸 Screenshots",    "value": "\`${SHOTS}\`",   "inline": true },
-                { "name": "🔗 Run URL",        "value": "[View Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})", "inline": false }
+                { "name": "📋 Status",      "value": "\`${STATUS}\`", "inline": true },
+                { "name": "🌐 Live hosts",  "value": "\`${LIVE}\`",  "inline": true },
+                { "name": "📸 Screenshots", "value": "\`${SHOTS}\`", "inline": true },
+                { "name": "🔗 Run URL", "value": "[View Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})", "inline": false }
               ],
               "footer": { "text": "GitHub Actions • ${{ github.repository }}" }
             }]
