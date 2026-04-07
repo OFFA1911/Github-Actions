@@ -39,7 +39,7 @@ jobs:
           if [ -n "$DOMAIN_INPUT" ]; then
             mapfile -t domains <<< "$DOMAIN_INPUT"
           else
-            mapfile -t domains < <(grep -v '^#' targets.txt | grep -v '^$')
+            mapfile -t domains < <(grep -v '^#' targets/wayback.txt | grep -v '^$')
           fi
           total=${#domains[@]}
           chunk_size=${CHUNK_SIZE:-30}

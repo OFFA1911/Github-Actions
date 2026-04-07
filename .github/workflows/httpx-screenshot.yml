@@ -49,15 +49,15 @@ jobs:
       - name: 📝 Prepare targets.txt
         run: |
           if [ -n "${{ github.event.inputs.targets }}" ]; then
-            printf '%s' "${{ github.event.inputs.targets }}" > targets.txt
+            printf '%s' "${{ github.event.inputs.targets }}" > targets/httpx-screenshot.txt
           fi
-          echo "[*] Targets: $(wc -l < targets.txt)"
+          echo "[*] Targets: $(wc -l < targets/httpx-screenshot.txt)"
 
       # ── 5. Run httpx (probe only, no screenshot) ───────────────────────
       - name: 🚀 Run httpx
         run: |
           httpx \
-            -l targets.txt \
+            -l targets/httpx-screenshot.txt \
             -threads ${{ github.event.inputs.threads }} \
             -silent \
             -o live_hosts.txt \
