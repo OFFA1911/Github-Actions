@@ -36,7 +36,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/go/bin
-          key: go-bins-httpx-${{ runner.os }}
+          key: go-bins-httpx-${{ runner.os }}-v2
 
       # ── 4. Install httpx only on cache miss ────────────────────────────
       - name: ⚙️ Install httpx
@@ -46,9 +46,17 @@ jobs:
       - name: 📌 Add Go bin to PATH
         run: echo "$HOME/go/bin" >> $GITHUB_PATH
 
-      # ── 5. Prepare Chrome (required for httpx -screenshot) ─────────────
-      - name: 🌍 Install Chrome
-        uses: browser-actions/setup-chrome@v1
+      # ── 5. Find Chrome (pre-installed on GitHub runners) ──────────────
+      - name: 🌍 Detect Chrome path
+        run: |
+          CHROME=$(which google-chrome-stable || which google-chrome || which chromium-browser || which chromium || echo "")
+          if [ -z "$CHROME" ]; then
+            echo "Chrome not found, installing..."
+            sudo apt-get update -qq && sudo apt-get install -y -qq chromium-browser
+            CHROME=$(which chromium-browser)
+          fi
+          echo "✅ Chrome: $CHROME"
+          echo "CHROME_PATH=$CHROME" >> $GITHUB_ENV
 
       # ── 6. Prepare targets file ────────────────────────────────────────
       - name: 📝 Prepare targets.txt
@@ -58,7 +66,7 @@ jobs:
           fi
           echo "[*] Targets loaded: $(wc -l < targets.txt)"
 
-      # ── 7. Run httpx with built-in screenshot ──────────────────────────
+      # ── 7. Run httpx + screenshot ──────────────────────────────────────
       - name: 🚀 Run httpx + Screenshot
         run: |
           mkdir -p screenshots
@@ -72,9 +80,9 @@ jobs:
             -tech-detect \
             -follow-redirects \
             -screenshot \
-            -srd screenshots/
-          echo "[+] Live hosts:   $(wc -l < live_hosts.txt)"
-          echo "[+] Screenshots:  $(find screenshots/ -name '*.png' 2>/dev/null | wc -l)"
+            -srd screenshots/ || true
+          echo "[+] Live hosts:  $(wc -l < live_hosts.txt 2>/dev/null || echo 0)"
+          echo "[+] Screenshots: $(find screenshots/ -name '*.png' 2>/dev/null | wc -l)"
 
       # ── 8. Upload artifacts ────────────────────────────────────────────
       - name: 📤 Upload results
@@ -94,7 +102,7 @@ jobs:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: |
           LIVE=$(wc -l < live_hosts.txt 2>/dev/null || echo 0)
-          SHOTS=$(find screenshots/ -name '*.png' 2>/dev/null | wc -l || echo 0)
+          SHOTS=$(find screenshots/ -name '*.png' 2>/dev/null | wc -l)
           STATUS="${{ job.status }}"
 
           if [ "$STATUS" = "success" ]; then
