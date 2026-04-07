@@ -1,0 +1,123 @@
+name: 🔀 Open Redirect Scanner
+
+on:
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: 'URLs (one per line) — leave empty to use targets/open-redirect.txt'
+        required: false
+        default: ''
+      concurrency:
+        description: 'Nuclei concurrency (parallel requests)'
+        required: false
+        default: '50'
+      rate_limit:
+        description: 'Requests per second limit'
+        required: false
+        default: '150'
+
+jobs:
+  scan:
+    name: 🔀 Open Redirect Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      # ── 1. Checkout ────────────────────────────────────────────────────
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      # ── 2. Go setup ────────────────────────────────────────────────────
+      - name: 🔧 Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: false
+
+      # ── 3. Cache nuclei binary ─────────────────────────────────────────
+      - name: 💾 Cache Go binaries
+        id: cache-bins
+        uses: actions/cache@v4
+        with:
+          path: ~/go/bin
+          key: go-bins-nuclei-${{ runner.os }}-v1
+
+      - name: ⚙️ Install nuclei
+        if: steps.cache-bins.outputs.cache-hit != 'true'
+        run: go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+
+      - name: 📌 Add Go bin to PATH
+        run: echo "$HOME/go/bin" >> $GITHUB_PATH
+
+      # ── 4. Prepare targets file ────────────────────────────────────────
+      - name: 📝 Prepare targets
+        run: |
+          if [ -n "${{ github.event.inputs.targets }}" ]; then
+            printf '%s' "${{ github.event.inputs.targets }}" > targets/open-redirect.txt
+          fi
+          echo "[*] Targets: $(grep -c '' targets/open-redirect.txt)"
+
+      # ── 5. Run nuclei open redirect scan ──────────────────────────────
+      - name: 🔀 Run Nuclei — Open Redirect
+        run: |
+          mkdir -p results
+          nuclei \
+            -l targets/open-redirect.txt \
+            -t nuclei-templates/openRedirect.yaml \
+            -c ${{ github.event.inputs.concurrency }} \
+            -rate-limit ${{ github.event.inputs.rate_limit }} \
+            -silent \
+            -o results/open-redirect.txt \
+            -no-interactsh || true
+          FOUND=$(grep -c '' results/open-redirect.txt 2>/dev/null || echo 0)
+          echo "[+] Findings: $FOUND"
+          echo "FOUND=$FOUND" >> $GITHUB_ENV
+
+      # ── 6. Upload results ──────────────────────────────────────────────
+      - name: 📤 Upload results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: open-redirect-${{ github.run_number }}
+          path: results/open-redirect.txt
+          retention-days: 14
+
+      # ── 7. Discord notification ────────────────────────────────────────
+      - name: 🔔 Notify Discord
+        if: always()
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: |
+          FOUND=${FOUND:-0}
+          STATUS="${{ job.status }}"
+          TARGETS=$(grep -c '' targets/open-redirect.txt 2>/dev/null || echo 0)
+
+          if [ "$STATUS" = "success" ]; then
+            COLOR=3066993
+            EMOJI="✅"
+          else
+            COLOR=15158332
+            EMOJI="❌"
+          fi
+
+          # If findings exist, change color to orange/red alert
+          if [ "$FOUND" -gt 0 ]; then
+            COLOR=16744272
+            EMOJI="🚨"
+          fi
+
+          curl -s -X POST "$DISCORD_WEBHOOK" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"embeds\": [{
+                \"title\": \"${EMOJI} Open Redirect Scan — Run #${{ github.run_number }}\",
+                \"color\": ${COLOR},
+                \"fields\": [
+                  { \"name\": \"📋 Status\",    \"value\": \"\`${STATUS}\`\",   \"inline\": true },
+                  { \"name\": \"🎯 Targets\",   \"value\": \"\`${TARGETS}\`\",  \"inline\": true },
+                  { \"name\": \"🚨 Findings\",  \"value\": \"\`${FOUND}\`\",    \"inline\": true },
+                  { \"name\": \"🔗 Run URL\",   \"value\": \"[View Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})\", \"inline\": false }
+                ],
+                \"footer\": { \"text\": \"Nuclei • openRedirect template • GitHub Actions\" }
+              }]
+            }"
