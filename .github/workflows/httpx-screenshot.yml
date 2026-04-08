@@ -45,7 +45,13 @@ jobs:
       - name: 📌 Add Go bin to PATH
         run: echo "$HOME/go/bin" >> $GITHUB_PATH
 
-      # ── 4. Prepare targets file ────────────────────────────────────────
+      # ── 4. Install Chrome (needed by httpx -ss internally) ─────────────
+      - name: 🌐 Install Chromium
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq chromium-browser
+
+      # ── 5. Prepare targets file ────────────────────────────────────────
       - name: 📝 Prepare targets.txt
         run: |
           if [ -n "${{ github.event.inputs.targets }}" ]; then
@@ -53,9 +59,11 @@ jobs:
           fi
           echo "[*] Targets: $(wc -l < targets/httpx-screenshot.txt)"
 
-      # ── 5. Run httpx (probe only, no screenshot) ───────────────────────
-      - name: 🚀 Run httpx
+      # ── 6. Run httpx with built-in screenshot ──────────────────────────
+      - name: 🚀 Run httpx + 📸 Screenshot
         run: |
+          mkdir -p screenshots
+
           httpx \
             -l targets/httpx-screenshot.txt \
             -threads ${{ github.event.inputs.threads }} \
@@ -64,42 +72,13 @@ jobs:
             -status-code \
             -title \
             -tech-detect \
-            -follow-redirects
+            -follow-redirects \
+            -ss \
+            -srd screenshots \
+            -no-fallback \
+            -timeout 15
+
           echo "[+] Live hosts: $(wc -l < live_hosts.txt)"
-          cat live_hosts.txt
-
-      # ── 6. Take screenshots with headless Chrome ───────────────────────
-      - name: 📸 Take Screenshots
-        run: |
-          mkdir -p screenshots
-
-          # Extract just the URLs (first column from httpx output)
-          awk '{print $1}' live_hosts.txt > urls_only.txt
-
-          # Install Chromium if not present
-          if ! command -v chromium-browser &>/dev/null && ! command -v google-chrome &>/dev/null; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq chromium-browser
-          fi
-
-          CHROME=$(command -v google-chrome-stable || command -v google-chrome || command -v chromium-browser || command -v chromium)
-          echo "[*] Using Chrome: $CHROME"
-
-          while IFS= read -r url; do
-            [ -z "$url" ] && continue
-            FNAME=$(echo "$url" | md5sum | cut -d' ' -f1)
-            echo "[→] Screenshot: $url"
-            "$CHROME" \
-              --headless=new \
-              --no-sandbox \
-              --disable-gpu \
-              --disable-dev-shm-usage \
-              --screenshot="screenshots/${FNAME}.png" \
-              --window-size=1280,800 \
-              --timeout=15000 \
-              "$url" 2>/dev/null || echo "  [!] Failed: $url"
-          done < urls_only.txt
-
           echo "[+] Screenshots: $(find screenshots/ -name '*.png' | wc -l)"
 
       # ── 7. Upload artifacts ────────────────────────────────────────────
