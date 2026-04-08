@@ -25,7 +25,7 @@ on:
 # ─────────────────────────────────────────────
 jobs:
   setup:
-    name: � Split Targets
+    name: 🔀 Split Targets
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.split.outputs.matrix }}
@@ -41,7 +41,7 @@ jobs:
           fi
           echo "[*] Total targets: $(grep -vc '^#' targets/open-redirect.txt)"
 
-      - name: � Build target chunks
+      - name: 🔧 Build target chunks
         id: split
         env:
           CHUNK_SIZE: ${{ github.event.inputs.chunk_size }}
@@ -51,26 +51,23 @@ jobs:
           chunk_size=${CHUNK_SIZE:-200}
           echo "✅ $total target(s) → chunks of $chunk_size"
 
+          # Build matrix as array of objects: [{chunk: [...]}, ...]
           matrix="[]"
           chunk=()
           for t in "${targets[@]}"; do
             chunk+=("$t")
             if (( ${#chunk[@]} >= chunk_size )); then
               chunk_json=$(printf '%s\n' "${chunk[@]}" | jq -Rcs 'split("\n")[:-1]')
-              matrix=$(echo "$matrix" | jq --argjson c "$chunk_json" '. + [$c]')
+              matrix=$(echo "$matrix" | jq --argjson c "$chunk_json" '. + [{"chunk": $c}]')
               chunk=()
             fi
           done
           if (( ${#chunk[@]} > 0 )); then
             chunk_json=$(printf '%s\n' "${chunk[@]}" | jq -Rcs 'split("\n")[:-1]')
-            matrix=$(echo "$matrix" | jq --argjson c "$chunk_json" '. + [$c]')
+            matrix=$(echo "$matrix" | jq --argjson c "$chunk_json" '. + [{"chunk": $c}]')
           fi
 
-          {
-            echo "matrix<<EOF"
-            echo "$matrix"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
 
 # ─────────────────────────────────────────────
 # JOB 2 — Run nuclei on each chunk
@@ -81,15 +78,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 340   # safely under GitHub's 6-hour hard limit
     strategy:
-      matrix:
-        chunk: ${{ fromJson(needs.setup.outputs.matrix) }}
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
       fail-fast: false
 
     steps:
-      - name: � Checkout
+      - name: 📥 Checkout
         uses: actions/checkout@v4
 
-      - name: �🔧 Setup Go
+      - name: 🔧 Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
@@ -134,6 +130,7 @@ jobs:
         with:
           name: open-redirect-chunk-${{ strategy.job-index }}
           path: results/findings.txt
+          if-no-files-found: ignore
           retention-days: 14
 
 # ─────────────────────────────────────────────
@@ -144,9 +141,11 @@ jobs:
     needs: scan
     runs-on: ubuntu-latest
     if: always()
+    outputs:
+      found: ${{ steps.merge.outputs.found }}
 
     steps:
-      - name: � Download all chunk results
+      - name: 📥 Download all chunk results
         uses: actions/download-artifact@v4
         with:
           pattern: open-redirect-chunk-*
@@ -154,13 +153,14 @@ jobs:
           merge-multiple: false
 
       - name: 🔀 Merge findings
+        id: merge
         run: |
           mkdir -p merged
           find all-chunks/ -name "findings.txt" -exec cat {} \; \
             | sort -u > merged/open-redirect-all.txt
           FOUND=$(grep -c '' merged/open-redirect-all.txt 2>/dev/null || echo 0)
           echo "[+] Total unique findings: $FOUND"
-          echo "FOUND=$FOUND" >> "$GITHUB_ENV"
+          echo "found=$FOUND" >> "$GITHUB_OUTPUT"
 
       - name: 📤 Upload merged results
         uses: actions/upload-artifact@v4
@@ -173,6 +173,7 @@ jobs:
         if: always()
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          FOUND: ${{ steps.merge.outputs.found }}
         run: |
           FOUND=${FOUND:-0}
           STATUS="${{ needs.scan.result }}"
