@@ -45,7 +45,13 @@ jobs:
       - name: 📌 Add Go bin to PATH
         run: echo "$HOME/go/bin" >> $GITHUB_PATH
 
-      # ── 4. Prepare targets file ────────────────────────────────────────
+      # ── 4. Install Chromium ────────────────────────────────────────────
+      - name: 🌐 Install Chromium
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq chromium-browser
+
+      # ── 5. Prepare targets file ────────────────────────────────────────
       - name: 📝 Prepare targets.txt
         run: |
           if [ -n "${{ github.event.inputs.targets }}" ]; then
@@ -53,7 +59,7 @@ jobs:
           fi
           echo "[*] Targets: $(wc -l < targets/httpx-screenshot.txt)"
 
-      # ── 5. Run httpx (probe only, no screenshot) ───────────────────────
+      # ── 6. Run httpx (probe only) ──────────────────────────────────────
       - name: 🚀 Run httpx
         run: |
           httpx \
@@ -64,23 +70,18 @@ jobs:
             -status-code \
             -title \
             -tech-detect \
-            -follow-redirects
+            -follow-redirects \
+            -timeout 15
+
           echo "[+] Live hosts: $(wc -l < live_hosts.txt)"
           cat live_hosts.txt
 
-      # ── 6. Take screenshots with headless Chrome ───────────────────────
+      # ── 7. Take screenshots with headless Chrome ───────────────────────
       - name: 📸 Take Screenshots
         run: |
           mkdir -p screenshots
 
-          # Extract just the URLs (first column from httpx output)
           awk '{print $1}' live_hosts.txt > urls_only.txt
-
-          # Install Chromium if not present
-          if ! command -v chromium-browser &>/dev/null && ! command -v google-chrome &>/dev/null; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq chromium-browser
-          fi
 
           CHROME=$(command -v google-chrome-stable || command -v google-chrome || command -v chromium-browser || command -v chromium)
           echo "[*] Using Chrome: $CHROME"
@@ -90,22 +91,24 @@ jobs:
             FNAME=$(echo "$url" | md5sum | cut -d' ' -f1)
             echo "[→] Screenshot: $url"
             "$CHROME" \
-              --headless=new \
+              --headless=old \
               --no-sandbox \
               --disable-gpu \
               --disable-dev-shm-usage \
+              --disable-setuid-sandbox \
+              --disable-software-rasterizer \
               --ignore-certificate-errors \
               --ignore-ssl-errors \
               --allow-insecure-localhost \
               --screenshot="screenshots/${FNAME}.png" \
               --window-size=1280,800 \
-              --timeout=15000 \
+              --virtual-time-budget=5000 \
               "$url" 2>/dev/null || echo "  [!] Failed: $url"
           done < urls_only.txt
 
           echo "[+] Screenshots: $(find screenshots/ -name '*.png' | wc -l)"
 
-      # ── 7. Upload artifacts ────────────────────────────────────────────
+      # ── 8. Upload artifacts ────────────────────────────────────────────
       - name: 📤 Upload results
         uses: actions/upload-artifact@v4
         if: always()
@@ -116,7 +119,7 @@ jobs:
             screenshots/
           retention-days: 14
 
-      # ── 8. Discord notification ────────────────────────────────────────
+      # ── 9. Discord notification ────────────────────────────────────────
       - name: 🔔 Notify Discord
         if: always()
         env:
