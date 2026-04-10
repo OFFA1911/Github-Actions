@@ -55,7 +55,7 @@ jobs:
     # ==============================
     - name: ASN Discovery
       run: |
-        asnmap -org "${{ github.event.inputs.target }}" -silent -duc -no-color > asns.txt 2>&1 || true
+        asnmap -org "${{ github.event.inputs.target }}" -silent -duc -no-color > asns.txt || true
         cat asns.txt
 
     # ==============================
@@ -63,7 +63,7 @@ jobs:
     # ==============================
     - name: Get CIDRs
       run: |
-        asnmap -silent -duc -no-color < asns.txt > cidrs.txt 2>&1 || true
+        asnmap -silent -duc -no-color < asns.txt > cidrs.txt || true
         cat cidrs.txt
 
     # ==============================
@@ -71,7 +71,7 @@ jobs:
     # ==============================
     - name: Expand IPs
       run: |
-        cat cidrs.txt | mapcidr -silent > ips.txt
+        cat cidrs.txt | mapcidr -silent -duc > ips.txt
         wc -l ips.txt
 
     # ==============================
