@@ -58,16 +58,17 @@ jobs:
             chunk+=("$t")
             if (( ${#chunk[@]} >= chunk_size )); then
               chunk_json=$(printf '%s\n' "${chunk[@]}" | jq -Rcs 'split("\n")[:-1]')
-              matrix=$(echo "$matrix" | jq --argjson c "$chunk_json" '. + [{"chunk": $c}]')
+              matrix=$(echo "$matrix" | jq -c --argjson c "$chunk_json" '. + [{"chunk": $c}]')
               chunk=()
             fi
           done
           if (( ${#chunk[@]} > 0 )); then
             chunk_json=$(printf '%s\n' "${chunk[@]}" | jq -Rcs 'split("\n")[:-1]')
-            matrix=$(echo "$matrix" | jq --argjson c "$chunk_json" '. + [{"chunk": $c}]')
+            matrix=$(echo "$matrix" | jq -c --argjson c "$chunk_json" '. + [{"chunk": $c}]')
           fi
 
-          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          # jq -c ensures single-line compact JSON — required for GITHUB_OUTPUT key=value format
+          printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
 
 # ─────────────────────────────────────────────
 # JOB 2 — Run nuclei on each chunk
@@ -158,9 +159,11 @@ jobs:
           mkdir -p merged
           find all-chunks/ -name "findings.txt" -exec cat {} \; \
             | sort -u > merged/open-redirect-all.txt
-          FOUND=$(grep -c '' merged/open-redirect-all.txt 2>/dev/null || echo 0)
+          # wc -l + tr ensures a clean integer with no whitespace
+          FOUND=$(wc -l < merged/open-redirect-all.txt 2>/dev/null | tr -d '[:space:]')
+          FOUND=${FOUND:-0}
           echo "[+] Total unique findings: $FOUND"
-          echo "found=$FOUND" >> "$GITHUB_OUTPUT"
+          printf 'found=%s\n' "$FOUND" >> "$GITHUB_OUTPUT"
 
       - name: 📤 Upload merged results
         uses: actions/upload-artifact@v4

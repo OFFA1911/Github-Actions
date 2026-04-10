@@ -1,0 +1,736 @@
+name: Subdomain Enumeration
+
+on:
+  workflow_dispatch:
+    inputs:
+      domain:
+        description: "Target domain (e.g. example.com)"
+        required: true
+        type: string
+
+jobs:
+  enumerate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      # ─────────────────────────────────────────
+      # 0. Checkout & load keys
+      # ─────────────────────────────────────────
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Load API keys from secret
+        run: |
+          # Loads from GitHub Secret named "enumeration"
+          echo "${{ secrets.enumeration }}" > /tmp/keys.env
+          while IFS= read -r line || [[ -n "$line" ]]; do
+            [[ "$line" =~ ^#.*$ || -z "$line" ]] && continue
+            echo "$line" >> $GITHUB_ENV
+          done < /tmp/keys.env
+
+      # ─────────────────────────────────────────
+      # 1. Notify Discord — Run started
+      # ─────────────────────────────────────────
+      - name: Discord — Started
+        run: |
+          DOMAIN="${{ github.event.inputs.domain }}"
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -s -X POST "$DISCORD_WEBHOOK" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "embeds": [{
+                "title": "🔍 Subdomain Enumeration Started",
+                "color": 3447003,
+                "fields": [
+                  {"name": "🎯 Target",  "value": "'"$DOMAIN"'",                          "inline": true},
+                  {"name": "📋 Run",     "value": "#${{ github.run_number }}",             "inline": true},
+                  {"name": "🔗 Run URL", "value": "[View on GitHub]('"$RUN_URL"')", "inline": false}
+                ],
+                "footer": {"text": "SubEnum Bot"},
+                "timestamp": "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"
+              }]
+            }' || true
+
+      # ─────────────────────────────────────────
+      # 2. Cache Go binaries
+      # ─────────────────────────────────────────
+      - name: Cache Go tools
+        uses: actions/cache@v4
+        id: cache-go-tools
+        with:
+          path: |
+            ~/go/bin
+            ~/.cache/go-build
+          key: go-tools-v4
+          restore-keys: go-tools-
+
+      # ─────────────────────────────────────────
+      # 3. Cache Python venvs
+      # ─────────────────────────────────────────
+      - name: Cache Python venvs
+        uses: actions/cache@v4
+        id: cache-python
+        with:
+          path: |
+            ~/.cache/pip
+            ~/venvs
+          key: python-tools-v4
+          restore-keys: python-tools-
+
+      # ─────────────────────────────────────────
+      # 4. Cache apt packages
+      # ─────────────────────────────────────────
+      - name: Cache apt packages
+        uses: actions/cache@v4
+        id: cache-apt
+        with:
+          path: /var/cache/apt/archives
+          key: apt-v3-${{ runner.os }}
+          restore-keys: apt-v3-
+
+      # ─────────────────────────────────────────
+      # 5. Cache jhaddix wordlist
+      # ─────────────────────────────────────────
+      - name: Cache jhaddix wordlist
+        uses: actions/cache@v4
+        id: cache-wordlist
+        with:
+          path: ~/wordlists/jhaddix_all.txt
+          key: jhaddix-wordlist-v1
+
+      # ─────────────────────────────────────────
+      # 6. System deps
+      # ─────────────────────────────────────────
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            git curl wget jq python3 python3-pip python3-venv \
+            nmap whois dnsutils libssl-dev libffi-dev \
+            build-essential cargo --no-install-recommends
+
+      # ─────────────────────────────────────────
+      # 7. Go setup
+      # ─────────────────────────────────────────
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: false
+
+      # ─────────────────────────────────────────
+      # 8. Install Go tools (cached)
+      # ─────────────────────────────────────────
+      - name: Install Go tools
+        if: steps.cache-go-tools.outputs.cache-hit != 'true'
+        run: |
+          go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+          go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest
+          go install -v github.com/tomnomnom/assetfinder@latest
+          go install -v github.com/lc/gau/v2/cmd/gau@latest
+          go install -v github.com/projectdiscovery/chaos-client/cmd/chaos@latest
+          go install -v github.com/ffuf/ffuf/v2@latest
+
+      - name: Add Go bin to PATH
+        run: echo "$HOME/go/bin" >> $GITHUB_PATH
+
+      # ─────────────────────────────────────────
+      # 9. Install Findomain (cached)
+      # ─────────────────────────────────────────
+      - name: Cache Findomain binary
+        uses: actions/cache@v4
+        id: cache-findomain
+        with:
+          path: ~/bin/findomain
+          key: findomain-v2-linux
+
+      - name: Install Findomain
+        if: steps.cache-findomain.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/bin
+          curl -sL https://github.com/Findomain/Findomain/releases/latest/download/findomain-linux-i386.zip \
+            -o /tmp/findomain.zip
+          unzip /tmp/findomain.zip -d ~/bin/
+          chmod +x ~/bin/findomain
+
+      - name: Add ~/bin to PATH
+        run: echo "$HOME/bin" >> $GITHUB_PATH
+
+      # ─────────────────────────────────────────
+      # 10. Install Amass (cached)
+      # ─────────────────────────────────────────
+      - name: Cache Amass binary
+        uses: actions/cache@v4
+        id: cache-amass
+        with:
+          path: ~/amass
+          key: amass-v4-linux
+
+      - name: Install Amass
+        if: steps.cache-amass.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/amass
+          AMASS_VER=$(curl -s https://api.github.com/repos/owasp-amass/amass/releases/latest | jq -r .tag_name)
+          curl -sL "https://github.com/owasp-amass/amass/releases/download/${AMASS_VER}/amass_Linux_amd64.zip" \
+            -o /tmp/amass.zip
+          unzip /tmp/amass.zip -d /tmp/amass_extracted/
+          find /tmp/amass_extracted -name "amass" -type f -exec cp {} ~/amass/amass \;
+          chmod +x ~/amass/amass
+
+      - name: Add amass to PATH
+        run: echo "$HOME/amass" >> $GITHUB_PATH
+
+      # ─────────────────────────────────────────
+      # 11. Install BBOT (cached)
+      # ─────────────────────────────────────────
+      - name: Install BBOT
+        run: |
+          if [ ! -f ~/venvs/bbot/bin/bbot ]; then
+            python3 -m venv ~/venvs/bbot
+            ~/venvs/bbot/bin/pip install --quiet bbot
+          fi
+          echo "$HOME/venvs/bbot/bin" >> $GITHUB_PATH
+
+      # ─────────────────────────────────────────
+      # 12. Install OneForAll (cached)
+      # ─────────────────────────────────────────
+      - name: Install OneForAll
+        run: |
+          if [ ! -d ~/tools/OneForAll ]; then
+            git clone --depth=1 https://github.com/shmilylty/OneForAll.git ~/tools/OneForAll
+            python3 -m venv ~/venvs/oneforall
+            ~/venvs/oneforall/bin/pip install --quiet -r ~/tools/OneForAll/requirements.txt
+          fi
+
+      # ─────────────────────────────────────────
+      # 13. Install Sudomy (cached)
+      # ─────────────────────────────────────────
+      - name: Install Sudomy
+        run: |
+          if [ ! -d ~/tools/Sudomy ]; then
+            git clone --depth=1 --recurse-submodules https://github.com/Screetsec/Sudomy.git ~/tools/Sudomy
+            python3 -m venv ~/venvs/sudomy
+            ~/venvs/sudomy/bin/pip install --quiet -r ~/tools/Sudomy/requirements.txt 2>/dev/null || true
+          fi
+
+      # ─────────────────────────────────────────
+      # 14. Download jhaddix wordlist (cached)
+      # ─────────────────────────────────────────
+      - name: Download jhaddix all.txt wordlist
+        if: steps.cache-wordlist.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/wordlists
+          curl -sL "https://gist.githubusercontent.com/jhaddix/86a06c5dc309d08580a018c66354a056/raw/all.txt" \
+            -o ~/wordlists/jhaddix_all.txt
+          echo "[*] Wordlist entries: $(wc -l < ~/wordlists/jhaddix_all.txt)"
+
+      # ─────────────────────────────────────────
+      # 15. Configure Subfinder API keys
+      # ─────────────────────────────────────────
+      - name: Configure Subfinder provider keys
+        run: |
+          mkdir -p ~/.config/subfinder
+          cat > ~/.config/subfinder/provider-config.yaml << EOF
+          securitytrails:
+            - ${SECURITYTRAILS_KEY:-}
+          chaos:
+            - ${CHAOS_KEY:-}
+          virustotal:
+            - ${VIRUSTOTAL_KEY:-}
+          shodan:
+            - ${SUBFINDER_SHODAN_KEY:-}
+          censys:
+            - ${SUBFINDER_CENSYS_ID:-}:${SUBFINDER_CENSYS_SECRET:-}
+          binaryedge:
+            - ${SUBFINDER_BINARYEDGE_KEY:-}
+          passivetotal:
+            - ${SUBFINDER_PASSIVETOTAL_USERNAME:-}:${SUBFINDER_PASSIVETOTAL_KEY:-}
+          github:
+            - ${GITHUB_TOKEN:-}
+          urlscan:
+            - ${URLSCAN_KEY:-}
+          fullhunt:
+            - ${FULLHUNT_KEY:-}
+          EOF
+
+      # ─────────────────────────────────────────
+      # 16. Create results directory
+      # ─────────────────────────────────────────
+      - name: Create results directory
+        run: |
+          mkdir -p results/raw results/final results/active
+          DOMAIN="${{ github.event.inputs.domain }}"
+          echo "DOMAIN=$DOMAIN" >> $GITHUB_ENV
+
+      # ═══════════════════════════════════════════
+      #           PASSIVE ENUMERATION (25 sources)
+      # ═══════════════════════════════════════════
+
+      # ─── 1. BBOT ───────────────────────────────
+      - name: "[Passive] BBOT"
+        continue-on-error: true
+        run: |
+          bbot -t "$DOMAIN" -f subdomain-enum -rf subdomain \
+            -o results/raw/bbot_out --quiet 2>/dev/null || true
+          find results/raw/bbot_out -name "*.txt" -exec cat {} \; 2>/dev/null \
+            | grep -oP '[\w\-\.]+\.'"${DOMAIN//./\\.}" \
+            | sort -u > results/raw/bbot.txt || true
+
+      # ─── 2. Subfinder ──────────────────────────
+      - name: "[Passive] Subfinder"
+        continue-on-error: true
+        run: |
+          subfinder -d "$DOMAIN" -all -silent \
+            -o results/raw/subfinder.txt 2>/dev/null || true
+
+      # ─── 3. Amass ──────────────────────────────
+      - name: "[Passive] Amass"
+        continue-on-error: true
+        timeout-minutes: 20
+        run: |
+          amass enum -passive -d "$DOMAIN" \
+            -o results/raw/amass.txt 2>/dev/null || true
+
+      # ─── 4. OneForAll ──────────────────────────
+      - name: "[Passive] OneForAll"
+        continue-on-error: true
+        run: |
+          cd ~/tools/OneForAll
+          ~/venvs/oneforall/bin/python oneforall.py \
+            --target "$DOMAIN" run 2>/dev/null || true
+          find . -name "*.txt" -newer oneforall.py -exec cat {} \; 2>/dev/null \
+            | grep -oP '[\w\-\.]+\.'"${DOMAIN//./\\.}" \
+            | sort -u > "$GITHUB_WORKSPACE/results/raw/oneforall.txt" || true
+
+      # ─── 5. crt.sh ─────────────────────────────
+      - name: "[Passive] crt.sh"
+        continue-on-error: true
+        run: |
+          curl -s "https://crt.sh/?q=%25.$DOMAIN&output=json" \
+            | jq -r '.[].name_value' 2>/dev/null \
+            | sed 's/\*\.//g' \
+            | sort -u > results/raw/crtsh.txt || true
+
+      # ─── 6. Certspotter ────────────────────────
+      - name: "[Passive] Certspotter"
+        continue-on-error: true
+        run: |
+          curl -s "https://api.certspotter.com/v1/issuances?domain=$DOMAIN&include_subdomains=true&expand=dns_names" \
+            | jq -r '.[].dns_names[]' 2>/dev/null \
+            | grep -oP '[\w\-\.]+\.'"${DOMAIN//./\\.}" \
+            | sort -u > results/raw/certspotter.txt || true
+
+      # ─── 7. Chaos ──────────────────────────────
+      - name: "[Passive] Chaos"
+        continue-on-error: true
+        run: |
+          if [ -n "$CHAOS_KEY" ]; then
+            chaos -d "$DOMAIN" -key "$CHAOS_KEY" -silent \
+              -o results/raw/chaos.txt 2>/dev/null || true
+          fi
+
+      # ─── 8. SecurityTrails ─────────────────────
+      - name: "[Passive] SecurityTrails"
+        continue-on-error: true
+        run: |
+          if [ -n "$SECURITYTRAILS_KEY" ]; then
+            curl -s --request GET \
+              --url "https://api.securitytrails.com/v1/domain/$DOMAIN/subdomains?children_only=false&include_inactive=true" \
+              --header "APIKEY: $SECURITYTRAILS_KEY" \
+              | jq -r '.subdomains[]' 2>/dev/null \
+              | sed "s/$/.${DOMAIN}/" \
+              | sort -u > results/raw/securitytrails.txt || true
+          fi
+
+      # ─── 9. GitHub Subdomains ──────────────────
+      - name: "[Passive] GitHub Subdomains"
+        continue-on-error: true
+        run: |
+          if [ -n "$GITHUB_TOKEN" ]; then
+            for page in 1 2 3 4 5; do
+              curl -s -H "Authorization: token $GITHUB_TOKEN" \
+                "https://api.github.com/search/code?q=$DOMAIN&per_page=100&page=$page" \
+                | jq -r '.items[].text_matches[]?.fragment' 2>/dev/null \
+                | grep -oP '[\w\-\.]+\.'"${DOMAIN//./\\.}" || true
+            done | sort -u > results/raw/github.txt
+          fi
+
+      # ─── 10. Wayback Machine ───────────────────
+      - name: "[Passive] Wayback Machine"
+        continue-on-error: true
+        run: |
+          curl -s "http://web.archive.org/cdx/search/cdx?url=*.$DOMAIN&output=json&fl=original&collapse=urlkey" \
+            | jq -r '.[][]' 2>/dev/null \
+            | grep -oP '[\w\-\.]+\.'"${DOMAIN//./\\.}" \
+            | sort -u > results/raw/wayback.txt || true
+
+      # ─── 11. VirusTotal ────────────────────────
+      - name: "[Passive] VirusTotal"
+        continue-on-error: true
+        run: |
+          if [ -n "$VIRUSTOTAL_KEY" ]; then
+            cursor=""
+            > results/raw/virustotal.txt
+            for i in $(seq 1 5); do
+              url="https://www.virustotal.com/api/v3/domains/$DOMAIN/subdomains?limit=40"
+              [ -n "$cursor" ] && url="$url&cursor=$cursor"
+              response=$(curl -s --request GET "$url" --header "x-apikey: $VIRUSTOTAL_KEY")
+              echo "$response" | jq -r '.data[].id' 2>/dev/null >> results/raw/virustotal.txt || true
+              cursor=$(echo "$response" | jq -r '.meta.cursor // empty' 2>/dev/null)
+              [ -z "$cursor" ] && break
+            done
+            sort -u -o results/raw/virustotal.txt results/raw/virustotal.txt
+          fi
+
+      # ─── 12. AlienVault OTX ────────────────────
+      - name: "[Passive] AlienVault OTX"
+        continue-on-error: true
+        run: |
+          curl -s "https://otx.alienvault.com/api/v1/indicators/domain/$DOMAIN/passive_dns" \
+            | jq -r '.passive_dns[].hostname' 2>/dev/null \
+            | grep -oP '[\w\-\.]+\.'"${DOMAIN//./\\.}" \
+            | sort -u > results/raw/alienvault.txt || true
+
+      # ─── 13. HackerTarget ──────────────────────
+      - name: "[Passive] HackerTarget"
+        continue-on-error: true
+        run: |
+          curl -s "https://api.hackertarget.com/hostsearch/?q=$DOMAIN" \
+            | cut -d',' -f1 \
+            | grep -oP '[\w\-\.]+\.'"${DOMAIN//./\\.}" \
+            | sort -u > results/raw/hackertarget.txt || true
+
+      # ─── 14. urlscan.io ────────────────────────
+      - name: "[Passive] urlscan.io"
+        continue-on-error: true
+        run: |
+          EXTRA_HEADER=""
+          [ -n "$URLSCAN_KEY" ] && EXTRA_HEADER="-H API-Key:$URLSCAN_KEY"
+          curl -s $EXTRA_HEADER \
+            "https://urlscan.io/api/v1/search/?q=domain:$DOMAIN&size=1000" \
+            | jq -r '.results[].page.domain' 2>/dev/null \
+            | grep -oP '[\w\-\.]+\.'"${DOMAIN//./\\.}" \
+            | sort -u > results/raw/urlscan.txt || true
+
+      # ─── 15. BufferOver.run ────────────────────
+      - name: "[Passive] BufferOver"
+        continue-on-error: true
+        run: |
+          curl -s "https://tls.bufferover.run/dns?q=.$DOMAIN" \
+            | jq -r '.FDNS_A[],.RDNS[]' 2>/dev/null \
+            | cut -d',' -f2 \
+            | grep -oP '[\w\-\.]+\.'"${DOMAIN//./\\.}" \
+            | sort -u > results/raw/bufferover.txt || true
+
+      # ─── 16. FullHunt ──────────────────────────
+      - name: "[Passive] FullHunt"
+        continue-on-error: true
+        run: |
+          if [ -n "$FULLHUNT_KEY" ]; then
+            curl -s "https://fullhunt.io/api/v1/domain/$DOMAIN/subdomains" \
+              -H "X-API-KEY: $FULLHUNT_KEY" \
+              | jq -r '.hosts[]' 2>/dev/null \
+              | sort -u > results/raw/fullhunt.txt || true
+          fi
+
+      # ─── 17. RapidDNS ──────────────────────────
+      - name: "[Passive] RapidDNS"
+        continue-on-error: true
+        run: |
+          curl -s "https://rapiddns.io/subdomain/$DOMAIN?full=1#result" \
+            | grep -oP '[\w\-\.]+\.'"${DOMAIN//./\\.}" \
+            | sort -u > results/raw/rapiddns.txt || true
+
+      # ─── 18. Riddler.io ────────────────────────
+      - name: "[Passive] Riddler"
+        continue-on-error: true
+        run: |
+          curl -s "https://riddler.io/search/exportcsv?q=pld:$DOMAIN" \
+            | cut -d',' -f6 \
+            | grep -oP '[\w\-\.]+\.'"${DOMAIN//./\\.}" \
+            | sort -u > results/raw/riddler.txt || true
+
+      # ─── 19. ThreatCrowd ───────────────────────
+      - name: "[Passive] ThreatCrowd"
+        continue-on-error: true
+        run: |
+          curl -s "https://www.threatcrowd.org/searchApi/v2/domain/report/?domain=$DOMAIN" \
+            | jq -r '.subdomains[]' 2>/dev/null \
+            | grep -oP '[\w\-\.]+\.'"${DOMAIN//./\\.}" \
+            | sort -u > results/raw/threatcrowd.txt || true
+
+      # ─── 20. Facebook CT ───────────────────────
+      - name: "[Passive] Facebook CT"
+        continue-on-error: true
+        run: |
+          if [ -n "$FACEBOOK_APP_ID" ] && [ -n "$FACEBOOK_APP_SECRET" ]; then
+            TOKEN=$(curl -s "https://graph.facebook.com/oauth/access_token?client_id=$FACEBOOK_APP_ID&client_secret=$FACEBOOK_APP_SECRET&grant_type=client_credentials" \
+              | jq -r '.access_token')
+            curl -s "https://graph.facebook.com/certificates?query=$DOMAIN&fields=domains&limit=500&access_token=$TOKEN" \
+              | jq -r '.data[].domains[]' 2>/dev/null \
+              | grep -oP '[\w\-\.]+\.'"${DOMAIN//./\\.}" \
+              | sort -u > results/raw/facebook_ct.txt || true
+          fi
+
+      # ─── 21. Assetfinder ───────────────────────
+      - name: "[Passive] Assetfinder"
+        continue-on-error: true
+        run: |
+          assetfinder --subs-only "$DOMAIN" 2>/dev/null \
+            | sort -u > results/raw/assetfinder.txt || true
+
+      # ─── 22. Findomain ─────────────────────────
+      - name: "[Passive] Findomain"
+        continue-on-error: true
+        run: |
+          findomain -t "$DOMAIN" -q 2>/dev/null \
+            | sort -u > results/raw/findomain.txt || true
+
+      # ─── 23. GAU ───────────────────────────────
+      - name: "[Passive] GAU"
+        continue-on-error: true
+        run: |
+          gau --subs "$DOMAIN" 2>/dev/null \
+            | grep -oP 'https?://\K[\w\-\.]+\.'"${DOMAIN//./\\.}" \
+            | sort -u > results/raw/gau.txt || true
+
+      # ─── 24. Sudomy ────────────────────────────
+      - name: "[Passive] Sudomy"
+        continue-on-error: true
+        run: |
+          cd ~/tools/Sudomy
+          ~/venvs/sudomy/bin/python sudomy -d "$DOMAIN" \
+            --no-probe 2>/dev/null || true
+          find output -name "*.txt" 2>/dev/null \
+            | xargs cat 2>/dev/null \
+            | grep -oP '[\w\-\.]+\.'"${DOMAIN//./\\.}" \
+            | sort -u > "$GITHUB_WORKSPACE/results/raw/sudomy.txt" || true
+
+      # ─── 25. reconFTW ──────────────────────────
+      - name: "[Passive] reconFTW"
+        continue-on-error: true
+        run: |
+          if [ ! -d ~/tools/reconftw ]; then
+            git clone --depth=1 https://github.com/six2dez/reconftw.git ~/tools/reconftw
+          fi
+          cd ~/tools/reconftw
+          bash reconftw.sh -d "$DOMAIN" -s 2>/dev/null || true
+          find results -name "*.txt" 2>/dev/null \
+            | xargs cat 2>/dev/null \
+            | grep -oP '[\w\-\.]+\.'"${DOMAIN//./\\.}" \
+            | sort -u > "$GITHUB_WORKSPACE/results/raw/reconftw.txt" || true
+
+      # ═══════════════════════════════════════════
+      #      ACTIVE ENUMERATION (jhaddix wordlist)
+      # ═══════════════════════════════════════════
+
+      - name: "[Active] DNS brute force — dnsx + jhaddix wordlist"
+        continue-on-error: true
+        timeout-minutes: 30
+        run: |
+          echo "[*] Building candidate list from wordlist..."
+          WL=~/wordlists/jhaddix_all.txt
+          echo "[*] Wordlist entries: $(wc -l < $WL)"
+
+          # Append domain to each word → api.example.com, dev.example.com ...
+          awk -v d=".$DOMAIN" '{print $0 d}' "$WL" > /tmp/candidates.txt
+
+          echo "[*] Running dnsx DNS brute force..."
+          dnsx \
+            -l /tmp/candidates.txt \
+            -silent \
+            -resp \
+            -t 100 \
+            -retry 2 \
+            -o results/active/brute_force_raw.txt \
+            2>/dev/null || true
+
+          cut -d' ' -f1 results/active/brute_force_raw.txt \
+            | sort -u > results/active/brute_force_clean.txt
+
+          echo "[*] DNS brute force found: $(wc -l < results/active/brute_force_clean.txt) subdomains"
+
+      - name: "[Active] HTTP discovery — ffuf + jhaddix wordlist"
+        continue-on-error: true
+        timeout-minutes: 30
+        run: |
+          echo "[*] Running ffuf HTTP-based subdomain discovery..."
+          ffuf \
+            -u "https://FUZZ.${DOMAIN}" \
+            -w ~/wordlists/jhaddix_all.txt \
+            -mc 200,201,204,301,302,307,401,403,405 \
+            -t 50 \
+            -timeout 5 \
+            -o results/active/ffuf_raw.json \
+            -of json \
+            -s \
+            2>/dev/null || true
+
+          # Extract matched words and append domain
+          jq -r '.results[].input.FUZZ' results/active/ffuf_raw.json 2>/dev/null \
+            | awk -v d=".$DOMAIN" '{print $0 d}' \
+            | sort -u > results/active/ffuf_clean.txt || true
+
+          echo "[*] ffuf found: $(wc -l < results/active/ffuf_clean.txt) subdomains"
+
+      # ═══════════════════════════════════════════
+      #         MERGE + DEDUPLICATE + DNSX
+      # ═══════════════════════════════════════════
+
+      - name: Merge all results (passive + active)
+        run: |
+          echo "[*] Merging all sources..."
+          cat \
+            results/raw/*.txt \
+            results/active/brute_force_clean.txt \
+            results/active/ffuf_clean.txt \
+            2>/dev/null \
+            | grep -oP '[\w\-\.]+\.'"${DOMAIN//./\\.}" \
+            | tr '[:upper:]' '[:lower:]' \
+            | sort -u > results/final/all_subdomains_raw.txt
+
+          TOTAL=$(wc -l < results/final/all_subdomains_raw.txt)
+          echo "[*] Total unique before DNS check: $TOTAL"
+          echo "TOTAL_RAW=$TOTAL" >> $GITHUB_ENV
+
+      - name: DNS validation with dnsx
+        run: |
+          dnsx \
+            -l results/final/all_subdomains_raw.txt \
+            -silent \
+            -resp \
+            -t 100 \
+            -o results/final/live_subdomains.txt \
+            2>/dev/null || true
+
+          cut -d' ' -f1 results/final/live_subdomains.txt \
+            | sort -u > results/final/subdomains_clean.txt
+
+          LIVE=$(wc -l < results/final/subdomains_clean.txt)
+          echo "[*] Live after dnsx: $LIVE"
+          echo "TOTAL_LIVE=$LIVE" >> $GITHUB_ENV
+
+      - name: Count active-only new findings
+        run: |
+          cat results/raw/*.txt 2>/dev/null \
+            | grep -oP '[\w\-\.]+\.'"${DOMAIN//./\\.}" \
+            | tr '[:upper:]' '[:lower:]' \
+            | sort -u > /tmp/passive_only.txt || true
+
+          ACTIVE_NEW=$(comm -13 /tmp/passive_only.txt \
+            results/final/subdomains_clean.txt 2>/dev/null | wc -l)
+          echo "ACTIVE_NEW=$ACTIVE_NEW" >> $GITHUB_ENV
+          echo "[*] New from active brute force only: $ACTIVE_NEW"
+
+      - name: Generate summary report
+        run: |
+          DOMAIN="${{ github.event.inputs.domain }}"
+          RUN_DATE=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          BRUTE=$(wc -l < results/active/brute_force_clean.txt 2>/dev/null || echo 0)
+          FFUF_COUNT=$(wc -l < results/active/ffuf_clean.txt 2>/dev/null || echo 0)
+
+          cat > results/final/summary.md << EOF
+          # Subdomain Enumeration Report
+
+          | Field                  | Value                        |
+          |------------------------|------------------------------|
+          | Domain                 | \`$DOMAIN\`                  |
+          | Date                   | $RUN_DATE                    |
+          | Raw (all sources)      | $TOTAL_RAW subdomains        |
+          | Live (dnsx validated)  | $TOTAL_LIVE subdomains       |
+          | DNS brute force hits   | $BRUTE                       |
+          | HTTP (ffuf) hits       | $FFUF_COUNT                  |
+          | Active-only new finds  | $ACTIVE_NEW unique new       |
+
+          ## Passive sources (25)
+          bbot, subfinder, amass, oneforall, crt.sh, certspotter, chaos,
+          securitytrails, github, wayback, virustotal, alienvault, hackertarget,
+          urlscan, bufferover, fullhunt, rapiddns, riddler, threatcrowd,
+          facebook_ct, assetfinder, findomain, gau, sudomy, reconftw
+
+          ## Active sources
+          - DNS brute force via dnsx (jhaddix all.txt ~40k entries)
+          - HTTP discovery via ffuf (jhaddix all.txt)
+
+          ## Output files
+          | File | Description |
+          |------|-------------|
+          | \`final/subdomains_clean.txt\`   | ✅ FINAL — live subdomains only |
+          | \`final/all_subdomains_raw.txt\` | All unique (unvalidated) |
+          | \`final/live_subdomains.txt\`    | Live + DNS responses |
+          | \`active/brute_force_clean.txt\` | DNS brute force results |
+          | \`active/ffuf_clean.txt\`        | HTTP discovery results |
+          | \`raw/*.txt\`                    | Per-source raw output |
+          EOF
+
+      # ─────────────────────────────────────────
+      # Upload artifact
+      # ─────────────────────────────────────────
+      - name: Upload results artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: subdomains-${{ github.event.inputs.domain }}-${{ github.run_id }}
+          path: results/
+          retention-days: 30
+
+      # ─────────────────────────────────────────
+      # Discord — Done ✅
+      # ─────────────────────────────────────────
+      - name: Discord — Completed successfully
+        if: success()
+        run: |
+          DOMAIN="${{ github.event.inputs.domain }}"
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          ARTIFACT="subdomains-${DOMAIN}-${{ github.run_id }}"
+
+          # Embed summary
+          curl -s -X POST "$DISCORD_WEBHOOK" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "embeds": [{
+                "title": "✅ Enumeration Complete",
+                "color": 5763719,
+                "fields": [
+                  {"name": "🎯 Target",                "value": "'"$DOMAIN"'",    "inline": true},
+                  {"name": "📊 Raw subdomains",         "value": "'"$TOTAL_RAW"'", "inline": true},
+                  {"name": "🟢 Live (dnsx)",            "value": "'"$TOTAL_LIVE"'","inline": true},
+                  {"name": "⚡ Active-only new finds",  "value": "'"$ACTIVE_NEW"'","inline": true},
+                  {"name": "📁 Artifact",               "value": "'"$ARTIFACT"'",  "inline": false},
+                  {"name": "🔗 Run",                    "value": "[View on GitHub]('"$RUN_URL"')", "inline": false}
+                ],
+                "footer": {"text": "SubEnum Bot • passive(25) + active(dnsx+ffuf) • jhaddix wordlist"},
+                "timestamp": "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"
+              }]
+            }' || true
+
+          # Upload subdomains file directly to Discord
+          if [ -s results/final/subdomains_clean.txt ]; then
+            curl -s -X POST "$DISCORD_WEBHOOK" \
+              -F "payload_json={\"content\":\"📎 **Live subdomains for \`$DOMAIN\`** — ${TOTAL_LIVE} found\"}" \
+              -F "file=@results/final/subdomains_clean.txt;filename=subdomains_${DOMAIN}.txt" \
+              || true
+          fi
+
+      # ─────────────────────────────────────────
+      # Discord — Failed ❌
+      # ─────────────────────────────────────────
+      - name: Discord — Failed
+        if: failure()
+        run: |
+          DOMAIN="${{ github.event.inputs.domain }}"
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -s -X POST "$DISCORD_WEBHOOK" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "embeds": [{
+                "title": "❌ Enumeration Failed",
+                "color": 15548997,
+                "fields": [
+                  {"name": "🎯 Target",  "value": "'"$DOMAIN"'",                          "inline": true},
+                  {"name": "🔗 Run URL", "value": "[View Run]('"$RUN_URL"')", "inline": false}
+                ],
+                "footer": {"text": "SubEnum Bot"},
+                "timestamp": "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"
+              }]
+            }' || true

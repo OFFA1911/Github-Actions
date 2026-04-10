@@ -1,0 +1,46 @@
+name: JS Recon
+
+on:
+  workflow_dispatch:
+    inputs:
+      js_urls_file:
+        description: 'Paste JS URLs (one per line)'
+        required: true
+
+jobs:
+  recon:
+    runs-on: ubuntu-latest
+    steps:
+
+    - name: Install Tools
+      run: |
+        go install github.com/projectdiscovery/httpx/cmd/httpx@latest
+        go install github.com/BishopFox/jsluice/cmd/jsluice@latest
+        echo "$HOME/go/bin" >> $GITHUB_PATH
+
+    - name: Prepare JS URLs
+      run: |
+        echo "${{ github.event.inputs.js_urls_file }}" > all_js.txt
+        cat all_js.txt | httpx -silent -mc 200 -o live_js.txt
+        echo "[+] Live JS files: $(wc -l < live_js.txt)"
+
+    - name: Download JS Files
+      run: |
+        mkdir -p js_files
+        cat live_js.txt | xargs -P 10 -I {} sh -c \
+          'curl -sk "{}" -o js_files/$(echo "{}" | md5sum | cut -d" " -f1).js'
+
+    - name: Extract Secrets & Endpoints
+      run: |
+        grep -rh -E "(api_key|apikey|secret|password|token|auth|private_key|AWS|firebase|AIza)" \
+          js_files/ | sort -u > secrets.txt
+
+        cat live_js.txt | jsluice urls | sort -u > endpoints.txt
+
+    - name: Upload Results
+      uses: actions/upload-artifact@v4
+      with:
+        name: recon-results
+        path: |
+          secrets.txt
+          endpoints.txt
