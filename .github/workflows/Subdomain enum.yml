@@ -21,9 +21,11 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Load API keys from secret
+        env:
+          KEYS_ENV: ${{ secrets.ENUMERATION }}
         run: |
-          # Loads from GitHub Secret named "enumeration"
-          echo "${{ secrets.enumeration }}" > /tmp/keys.env
+          # Loads from GitHub Secret named "ENUMERATION"
+          printf '%s' "$KEYS_ENV" > /tmp/keys.env
           while IFS= read -r line || [[ -n "$line" ]]; do
             [[ "$line" =~ ^#.*$ || -z "$line" ]] && continue
             echo "$line" >> $GITHUB_ENV
