@@ -172,22 +172,15 @@ jobs:
       - name: Install Amass
         if: steps.cache-amass.outputs.cache-hit != 'true'
         run: |
-          mkdir -p ~/amass
+          mkdir -p ~/amass /tmp/amass_extracted
           AMASS_VER=$(curl -s https://api.github.com/repos/owasp-amass/amass/releases/latest | jq -r .tag_name)
-          echo "[*] Downloading Amass ${AMASS_VER}..."
-          curl -sL "https://github.com/owasp-amass/amass/releases/download/${AMASS_VER}/amass_Linux_amd64.zip" \
-            -o /tmp/amass.zip
-          # Amass switched to tar.gz on Linux — fallback if zip fails
-          if ! unzip -t /tmp/amass.zip &>/dev/null; then
-            echo "[*] zip invalid, trying tar.gz..."
-            curl -sL "https://github.com/owasp-amass/amass/releases/download/${AMASS_VER}/amass_Linux_amd64.tar.gz" \
-              -o /tmp/amass.tar.gz
-            tar -xzf /tmp/amass.tar.gz -C /tmp/amass_extracted/ --strip-components=1
-          else
-            unzip /tmp/amass.zip -d /tmp/amass_extracted/
-          fi
+          echo "[*] Downloading Amass ${AMASS_VER} (tar.gz)..."
+          curl -sL "https://github.com/owasp-amass/amass/releases/download/${AMASS_VER}/amass_Linux_amd64.tar.gz" \
+            -o /tmp/amass.tar.gz
+          tar -xzf /tmp/amass.tar.gz -C /tmp/amass_extracted/ --strip-components=1
           find /tmp/amass_extracted -name "amass" -type f -exec cp {} ~/amass/amass \;
           chmod +x ~/amass/amass
+          echo "[*] Amass installed: $(~/amass/amass --version 2>&1 || true)"
 
       - name: Add amass to PATH
         run: echo "$HOME/amass" >> $GITHUB_PATH
