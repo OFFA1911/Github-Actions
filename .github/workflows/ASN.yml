@@ -20,7 +20,7 @@ jobs:
       uses: actions/cache@v4
       with:
         path: ~/go/bin
-        key: tools-cache-v1
+        key: tools-cache-v2
 
     # ==============================
     # System dependencies (libpcap for naabu)
@@ -52,7 +52,7 @@ jobs:
     # ==============================
     - name: ASN Discovery
       run: |
-        asnmap -org "${{ github.event.inputs.target }}" -silent > asns.txt
+        asnmap -org "${{ github.event.inputs.target }}" -silent < /dev/null > asns.txt
         cat asns.txt
 
     # ==============================
@@ -60,7 +60,7 @@ jobs:
     # ==============================
     - name: Get CIDRs
       run: |
-        cat asns.txt | asnmap -silent > cidrs.txt
+        asnmap -silent < asns.txt > cidrs.txt
         cat cidrs.txt
 
     # ==============================
