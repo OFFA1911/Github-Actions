@@ -1,4 +1,4 @@
-name: asn
+name: ASN
 
 on:
   workflow_dispatch:
@@ -17,7 +17,7 @@ jobs:
     # ==============================
     - name: Cache tools
       id: cache-tools
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: ~/go/bin
         key: tools-cache-v1
