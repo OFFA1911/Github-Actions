@@ -10,6 +10,9 @@ on:
 jobs:
   recon:
     runs-on: ubuntu-latest
+    env:
+      DISABLE_CLOUD_UPLOAD: "true"
+      PDCP_API_KEY: "none"
 
     steps:
     # ==============================
@@ -52,7 +55,7 @@ jobs:
     # ==============================
     - name: ASN Discovery
       run: |
-        asnmap -org "${{ github.event.inputs.target }}" -silent < /dev/null > asns.txt
+        asnmap -org "${{ github.event.inputs.target }}" -silent -duc -no-color > asns.txt 2>&1 || true
         cat asns.txt
 
     # ==============================
@@ -60,7 +63,7 @@ jobs:
     # ==============================
     - name: Get CIDRs
       run: |
-        asnmap -silent < asns.txt > cidrs.txt
+        asnmap -silent -duc -no-color < asns.txt > cidrs.txt 2>&1 || true
         cat cidrs.txt
 
     # ==============================
