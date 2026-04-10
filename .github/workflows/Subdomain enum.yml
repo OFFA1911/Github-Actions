@@ -167,7 +167,7 @@ jobs:
         id: cache-amass
         with:
           path: ~/amass
-          key: amass-v4-linux
+          key: amass-v4-tgz-linux
 
       - name: Install Amass
         if: steps.cache-amass.outputs.cache-hit != 'true'
