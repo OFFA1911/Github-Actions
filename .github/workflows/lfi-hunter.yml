@@ -1,0 +1,379 @@
+name: LFI Automated Hunter
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Target domain (e.g. example.com)"
+        required: true
+        type: string
+      notify_telegram:
+        description: "Send results to Telegram?"
+        required: false
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+
+  schedule:
+    # كل يوم الساعة 2 الصبح
+    - cron: "0 2 * * *"
+
+env:
+  TARGET: ${{ github.event.inputs.target || vars.DEFAULT_TARGET }}
+  GO_VERSION: "1.21"
+
+jobs:
+  # ===========================
+  # JOB 1: RECON & URL COLLECTION
+  # ===========================
+  recon:
+    name: Recon & URL Collection
+    runs-on: ubuntu-latest
+    outputs:
+      urls_found: ${{ steps.check.outputs.urls_found }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Cache Tools
+        id: cache-tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/bin
+            ~/.local/lib/python*/site-packages
+            ~/.local/bin
+          key: ${{ runner.os }}-lfi-tools-v1
+
+      - name: Install tools
+        if: steps.cache-tools.outputs.cache-hit != 'true'
+        run: |
+          # subfinder
+          go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+
+          # httpx
+          go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+
+          # gau
+          go install github.com/lc/gau/v2/cmd/gau@latest
+
+          # uro (using --user to ensure it goes to ~/.local/bin)
+          pip install uro --quiet --user
+
+          # gf + patterns
+          go install github.com/tomnomnom/gf@latest
+
+          # nuclei
+          go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+
+      - name: Add tools to PATH & Setup gf
+        run: |
+          echo "$HOME/go/bin" >> $GITHUB_PATH
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          # Ensure .gf directory exists
+          mkdir -p ~/.gf
+
+      - name: Write custom LFI gf patterns
+        run: |
+          cat > ~/.gf/lfi.json << 'EOF'
+          {
+            "flags": "-iE",
+            "patterns": [
+              "file=","document=","folder=","root=","path=","pg=",
+              "style=","pdf=","template=","php_path=","doc=","page=",
+              "name=","cat=","dir=","action=","board=","date=","detail=",
+              "download=","prefix=","include=","inc=","locate=","show=",
+              "site=","type=","view=","content=","layout=","mod=","conf=",
+              "url=","load=","read=","open=","fetch=","retrieve=",
+              "require=","import=","src=","source=","filename=","filepath=",
+              "pathname=","realpath=","resource=","data=","stream=",
+              "tpl=","tmpl=","theme=","skin=","lang=","locale=","language=",
+              "component=","module=","section=","chapter=","part=",
+              "display=","render=","output=","redirect=","next=","return=",
+              "goto=","forward=","base=","base_path=","base_dir=","base_url=",
+              "upload=","file_path=","file_name=","logfile=","log=","report=",
+              "config=","cfg=","setting=","settings=","ini=",
+              "image=","img=","photo=","thumb=","script=","asset="
+            ]
+          }
+          EOF
+
+      - name: Subdomain enumeration
+        run: |
+          echo "[*] Running subfinder on $TARGET"
+          subfinder -d $TARGET -silent -o subdomains.txt
+          echo "[*] Found $(wc -l < subdomains.txt) subdomains"
+
+      - name: Filter live hosts
+        run: |
+          echo "[*] Checking live hosts with httpx"
+          cat subdomains.txt | httpx -silent -o live_hosts.txt
+          echo "[*] Live hosts: $(wc -l < live_hosts.txt)"
+
+      - name: Collect URLs (gau)
+        run: |
+          echo "[*] Collecting URLs with gau"
+          cat live_hosts.txt | gau --threads 5 --timeout 10 2>/dev/null | uro > all_urls.txt
+          echo "[*] Total URLs collected: $(wc -l < all_urls.txt)"
+
+      - name: Filter LFI-suspicious URLs
+        run: |
+          echo "[*] Filtering LFI candidates with gf"
+          cat all_urls.txt | gf lfi | sort -u > lfi_urls.txt
+          echo "[*] LFI candidates: $(wc -l < lfi_urls.txt)"
+
+      - name: Check if URLs found
+        id: check
+        run: |
+          COUNT=$(wc -l < lfi_urls.txt)
+          echo "urls_found=$COUNT" >> $GITHUB_OUTPUT
+          if [ "$COUNT" -eq "0" ]; then
+            echo "[!] No LFI candidates found — skipping scan"
+          else
+            echo "[+] $COUNT URLs ready for scanning"
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: recon-results
+          path: |
+            subdomains.txt
+            live_hosts.txt
+            all_urls.txt
+            lfi_urls.txt
+          retention-days: 7
+
+  # ===========================
+  # JOB 2: NUCLEI SCAN
+  # ===========================
+  nuclei-scan:
+    name: Nuclei LFI Scan
+    runs-on: ubuntu-latest
+    needs: recon
+    if: needs.recon.outputs.urls_found > 0
+
+    steps:
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Cache Tools (Nuclei)
+        id: cache-tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/bin
+          # Using same cache key will ensure we get the installed nuclei binary
+          key: ${{ runner.os }}-lfi-tools-v1
+
+      - name: Install nuclei
+        if: steps.cache-tools.outputs.cache-hit != 'true'
+        run: |
+          go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+
+      - name: Add to PATH
+        run: echo "$HOME/go/bin" >> $GITHUB_PATH
+
+      - name: Download recon artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: recon-results
+
+      - name: Update nuclei templates
+        run: nuclei -update-templates -silent
+
+      - name: Run nuclei - LFI templates
+        run: |
+          echo "[*] Starting nuclei LFI scan"
+          nuclei \
+            -l lfi_urls.txt \
+            -tags lfi \
+            -severity medium,high,critical \
+            -rate-limit 50 \
+            -timeout 10 \
+            -retries 2 \
+            -silent \
+            -o nuclei_lfi_results.txt \
+            -json-export nuclei_lfi_results.json \
+            || true
+          echo "[*] Nuclei done. Results: $(wc -l < nuclei_lfi_results.txt 2>/dev/null || echo 0)"
+
+      - name: Run nuclei - Fuzzing templates (deeper)
+        run: |
+          echo "[*] Running fuzzing templates"
+          nuclei \
+            -l lfi_urls.txt \
+            -t fuzzing-templates/ \
+            -tags lfi \
+            -fuzz \
+            -rate-limit 20 \
+            -timeout 15 \
+            -silent \
+            -o nuclei_fuzz_results.txt \
+            -json-export nuclei_fuzz_results.json \
+            || true
+
+      - name: Merge & deduplicate results
+        run: |
+          cat nuclei_lfi_results.txt nuclei_fuzz_results.txt 2>/dev/null \
+            | sort -u > all_findings.txt
+          echo "[+] Total unique findings: $(wc -l < all_findings.txt)"
+
+      - name: Upload scan results
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuclei-results
+          path: |
+            nuclei_lfi_results.txt
+            nuclei_lfi_results.json
+            nuclei_fuzz_results.txt
+            nuclei_fuzz_results.json
+            all_findings.txt
+          retention-days: 14
+
+  # ===========================
+  # JOB 3: REPORT & NOTIFY
+  # ===========================
+  report:
+    name: Generate Report & Notify
+    runs-on: ubuntu-latest
+    needs: [recon, nuclei-scan]
+    if: always()
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "*-results"
+          merge-multiple: true
+
+      - name: Generate HTML report
+        run: |
+          FINDINGS=$(wc -l < all_findings.txt 2>/dev/null || echo 0)
+          LFI_URLS=$(wc -l < lfi_urls.txt 2>/dev/null || echo 0)
+          SUBDOMAINS=$(wc -l < subdomains.txt 2>/dev/null || echo 0)
+          DATE=$(date '+%Y-%m-%d %H:%M UTC')
+
+          cat > report.html << EOF
+          <!DOCTYPE html>
+          <html dir="rtl" lang="ar">
+          <head>
+            <meta charset="UTF-8">
+            <title>LFI Scan Report - $TARGET</title>
+            <style>
+              body { font-family: Arial, sans-serif; margin: 2rem; background: #f5f5f5; }
+              .header { background: #1a1a2e; color: white; padding: 1.5rem; border-radius: 8px; margin-bottom: 1.5rem; }
+              .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-bottom: 1.5rem; }
+              .stat { background: white; padding: 1rem; border-radius: 8px; text-align: center; border: 1px solid #e0e0e0; }
+              .stat-n { font-size: 2rem; font-weight: bold; color: #1a1a2e; }
+              .stat-l { color: #666; font-size: 0.85rem; }
+              .findings { background: white; border-radius: 8px; padding: 1rem; border: 1px solid #e0e0e0; }
+              .finding { border-left: 4px solid #e74c3c; padding: .75rem; margin: .5rem 0; background: #fff5f5; border-radius: 0 4px 4px 0; font-family: monospace; font-size: 0.85rem; word-break: break-all; }
+              .no-findings { text-align: center; color: #27ae60; padding: 2rem; font-size: 1.2rem; }
+            </style>
+          </head>
+          <body>
+            <div class="header">
+              <h1>LFI Scan Report</h1>
+              <p>Target: $TARGET | Date: $DATE</p>
+            </div>
+            <div class="stats">
+              <div class="stat"><div class="stat-n">$SUBDOMAINS</div><div class="stat-l">Subdomains</div></div>
+              <div class="stat"><div class="stat-n">$LFI_URLS</div><div class="stat-l">LFI Candidates</div></div>
+              <div class="stat"><div class="stat-n">$FINDINGS</div><div class="stat-l">Findings</div></div>
+            </div>
+            <div class="findings">
+              <h2>Findings</h2>
+          EOF
+
+          if [ "$FINDINGS" -gt "0" ]; then
+            while IFS= read -r line; do
+              echo "<div class='finding'>$line</div>" >> report.html
+            done < all_findings.txt
+          else
+            echo "<div class='no-findings'>No findings detected</div>" >> report.html
+          fi
+
+          echo "</div></body></html>" >> report.html
+          echo "[+] Report generated"
+
+      - name: Send Telegram notification
+        if: github.event.inputs.notify_telegram == 'true' && env.TELEGRAM_BOT_TOKEN != ''
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          FINDINGS=$(wc -l < all_findings.txt 2>/dev/null || echo 0)
+          LFI_URLS=$(wc -l < lfi_urls.txt 2>/dev/null || echo 0)
+
+          if [ "$FINDINGS" -gt "0" ]; then
+            EMOJI="🔴"
+            STATUS="تم اكتشاف ثغرات محتملة!"
+          else
+            EMOJI="✅"
+            STATUS="لا توجد نتائج"
+          fi
+
+          MESSAGE="${EMOJI} LFI Scan Report
+          ━━━━━━━━━━━━━━━━━━
+          🎯 Target: $TARGET
+          📅 Date: $(date '+%Y-%m-%d %H:%M')
+          ━━━━━━━━━━━━━━━━━━
+          🔍 LFI Candidates: $LFI_URLS
+          ⚠️ Findings: $FINDINGS
+          ━━━━━━━━━━━━━━━━━━
+          $STATUS
+          
+          ⚡ تحقق يدوياً من النتائج في Burp Suite"
+
+          # لو فيه findings، ابعت أول 10 منهم
+          if [ "$FINDINGS" -gt "0" ]; then
+            TOP=$(head -10 all_findings.txt | sed 's/&/\&amp;/g')
+            MESSAGE="$MESSAGE
+
+          📋 أول النتائج:
+          $TOP"
+          fi
+
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d text="$MESSAGE" \
+            -d parse_mode="HTML" > /dev/null
+
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: scan-report
+          path: report.html
+          retention-days: 30
+
+      - name: Summary
+        run: |
+          FINDINGS=$(wc -l < all_findings.txt 2>/dev/null || echo 0)
+          echo "## LFI Scan Summary" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Count |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Target | $TARGET |" >> $GITHUB_STEP_SUMMARY
+          echo "| Subdomains | $(wc -l < subdomains.txt 2>/dev/null || echo 0) |" >> $GITHUB_STEP_SUMMARY
+          echo "| LFI Candidates | $(wc -l < lfi_urls.txt 2>/dev/null || echo 0) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Findings | $FINDINGS |" >> $GITHUB_STEP_SUMMARY
+          if [ "$FINDINGS" -gt "0" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Findings" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            cat all_findings.txt >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          fi
