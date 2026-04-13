@@ -86,10 +86,12 @@ jobs:
       # 4. حل مفاتيح subfinder
       # ─────────────────────────────────────────────
       - name: Write subfinder provider config
+        env:
+          ENUMERATION: ${{ secrets.ENUMERATION }}
         run: |
           mkdir -p ~/.config/subfinder
           # Secret اسمه ENUMERATION وفيه محتوى provider-config.yaml كامل
-          echo "${{ secrets.ENUMERATION }}" > ~/.config/subfinder/provider-config.yaml
+          echo "$ENUMERATION" > ~/.config/subfinder/provider-config.yaml
 
       # ─────────────────────────────────────────────
       # 5. المتغيرات المشتركة
