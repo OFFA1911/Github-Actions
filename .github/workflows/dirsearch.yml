@@ -3,10 +3,10 @@ name: Dirsearch Bug Bounty
 on:
   workflow_dispatch:
     inputs:
-      ips_file:
-        description: 'Path to alive IPs file (default: ips_alive)'
-        required: false
-        default: 'ips_alive'
+      targets_file:
+        description: 'Targets file inside targets/ directory'
+        required: true
+        default: 'dirsearch.txt'
       threads:
         description: 'Number of threads (default: 25)'
         required: false
@@ -14,7 +14,7 @@ on:
   push:
     branches: [main]
     paths:
-      - 'ips_alive'
+      - 'targets/dirsearch.txt'
 
 jobs:
   dirsearch:
@@ -36,13 +36,13 @@ jobs:
 
       - name: Run dirsearch
         run: |
-          IPS_FILE="${{ github.event.inputs.ips_file || 'ips_alive' }}"
+          TARGETS_FILE="targets/${{ github.event.inputs.targets_file || 'dirsearch.txt' }}"
           THREADS="${{ github.event.inputs.threads || '25' }}"
           TIMESTAMP=$(date +%Y%m%d_%H%M%S)
           OUTPUT="output_${TIMESTAMP}.txt"
 
           dirsearch \
-            -l "$IPS_FILE" \
+            -l "$TARGETS_FILE" \
             --full-url \
             --recursive \
             --exclude-sizes=0B \
